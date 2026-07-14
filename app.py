@@ -12,10 +12,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from src import form, odds_api, picks  # noqa: E402  (must follow load_dotenv())
+from src import form, odds_api, picks, render  # noqa: E402  (must follow load_dotenv())
 from src.probability import fmt_stars  # noqa: E402
 
 st.set_page_config(page_title="Betting Research Dashboard", layout="wide", page_icon="📊")
+st.markdown(render.inject_css(), unsafe_allow_html=True)
 
 st.title("📊 Betting Research Dashboard")
 st.caption(
@@ -151,10 +152,35 @@ for group in groups:
                     }
                 )
 
+    st.markdown(
+        render.stat_tiles(
+            [("Live now", len(live_rows) if show_live else "—"),
+             ("Upcoming tracked", len([e for e in all_events if e.get("commence_time")])),
+             ("Leagues in season", len(leagues))]
+        ),
+        unsafe_allow_html=True,
+    )
+
     if show_live:
         st.subheader("🔴 Live")
         if live_rows:
-            st.dataframe(pd.DataFrame(live_rows), use_container_width=True, hide_index=True)
+            for lr in live_rows:
+                st.markdown(
+                    render.fixture_card(
+                        when="In progress",
+                        league=lr["League"],
+                        sport=group,
+                        home=lr["Home"],
+                        away=lr["Away"],
+                        h2h=None,
+                        total_pick=None,
+                        is_live=True,
+                        live_score=lr["Score"],
+                    ),
+                    unsafe_allow_html=True,
+                )
+            with st.expander("Table view"):
+                st.dataframe(pd.DataFrame(live_rows), width="stretch", hide_index=True)
         else:
             st.caption("No live games right now.")
 
@@ -176,7 +202,7 @@ for group in groups:
                 ct = parse_iso(ev.get("commence_time", ""))
                 when = ct.astimezone().strftime("%a %d %b, %H:%M") if ct else ev.get("commence_time", "?")
 
-                fav_name, fav_pct, fav_odds, fav_book, fav_stars = "N/A", "N/A", "N/A", "N/A", ""
+                fav_name, fav_pct, fav_odds, fav_book, fav_stars = "N/A", "N/A", "N/A", "N/A", 0
                 if h2h and h2h["outcomes"]:
                     fav_name, fav_data = max(
                         h2h["outcomes"].items(), key=lambda kv: (kv[1]["fair_prob"] or 0)
@@ -184,9 +210,9 @@ for group in groups:
                     fav_pct = f"{round((fav_data['fair_prob'] or 0) * 100)}%"
                     fav_odds = fav_data["best_odds"]
                     fav_book = fav_data["best_book"]
-                    fav_stars = fmt_stars(h2h["stars"])
+                    fav_stars = h2h["stars"]
 
-                ou_txt, ou_odds, ou_book, ou_stars = "N/A", "N/A", "N/A", ""
+                ou_txt, ou_odds, ou_book, ou_stars = "N/A", "N/A", "N/A", 0
                 if total_pick:
                     side = total_pick["side"]
                     pct = round(
@@ -195,7 +221,7 @@ for group in groups:
                     ou_txt = f"{side} {total_pick['point']} (~{pct}%)"
                     ou_odds = total_pick["best_over_odds"] if side == "Over" else total_pick["best_under_odds"]
                     ou_book = total_pick["best_over_book"] if side == "Over" else total_pick["best_under_book"]
-                    ou_stars = fmt_stars(total_pick["stars"])
+                    ou_stars = total_pick["stars"]
 
                 row = {
                     "Date": when,
@@ -205,10 +231,10 @@ for group in groups:
                     "Favorite": fav_name,
                     "Win %": fav_pct,
                     "Moneyline pick": f"{fav_odds} @ {fav_book}" if fav_odds != "N/A" else "N/A",
-                    "1X2 confidence": fav_stars,
+                    "1X2 confidence": fmt_stars(fav_stars) if fav_stars else "N/A",
                     "O/U pick": ou_txt,
                     "O/U odds": f"{ou_odds} @ {ou_book}" if ou_odds != "N/A" else "N/A",
-                    "O/U confidence": ou_stars,
+                    "O/U confidence": fmt_stars(ou_stars) if ou_stars else "N/A",
                 }
                 if fetch_form:
                     hf = cached_form(home)
@@ -217,8 +243,22 @@ for group in groups:
                     row["Away form"] = f"{af['results']} ({af['score']}%)" if af else "N/A"
                 rows.append(row)
 
-                with st.expander(f"{when} — {home} vs {away} ({ev.get('_league')})"):
+                st.markdown(
+                    render.fixture_card(
+                        when=when,
+                        league=ev.get("_league"),
+                        sport=group,
+                        home=home,
+                        away=away,
+                        h2h=h2h,
+                        total_pick=total_pick,
+                    ),
+                    unsafe_allow_html=True,
+                )
+                with st.expander(f"Full breakdown — {home} vs {away}"):
                     st.write(verdict)
+                    if fetch_form:
+                        st.caption(f"Recent form — {row.get('Home form', 'N/A')} vs {row.get('Away form', 'N/A')}")
                     if h2h:
                         st.markdown("**Moneyline / 1X2 — all outcomes:**")
                         st.table(pd.DataFrame(h2h["outcomes"]).T)
@@ -228,7 +268,8 @@ for group in groups:
                             f"→ chosen balance-point line: **{total_pick['point']} {total_pick['side']}**"
                         )
 
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            with st.expander("Table view (all fixtures)"):
+                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     if quota_left is not None:
         st.caption(f"Odds API quota remaining this month: {quota_left}")
