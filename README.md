@@ -68,21 +68,32 @@ start.sh                One-command launcher (venv setup + run)
 
 ## Dashboard controls
 
-- **Sports** — toggle soccer / basketball / baseball / cricket.
+- **Sports** — toggle soccer / basketball / baseball / cricket. Defaults to
+  soccer only — add more deliberately, since each one costs quota.
+- **`<Sport>` leagues** — appears per selected sport once you pick it; choose
+  specific leagues instead of pulling everything in season. Defaults to the
+  first 5 available. **This is the main quota lever** — a sport can have
+  15-20+ leagues in season at once, and each one is a separate paid call.
 - **Bookmaker regions** — `eu` (Pinnacle, Unibet, ...), `uk` (William Hill,
   Ladbrokes, ...), `us` (FanDuel, DraftKings, ...), `au`. More regions =
   more books compared = more API quota used per refresh.
-- **Show live / upcoming** — toggle each section independently.
+- **Show live / upcoming** — toggle each section independently. Live pulls a
+  second (scores) call per selected league, so turn it off if you only care
+  about upcoming fixtures.
 - **Include recent-form lookup** — optional, slower; best-effort last-5
-  results per team from TheSportsDB, skipped (shown as "N/A") if a team
-  can't be matched by name.
+  results per team from TheSportsDB (separate free API, doesn't touch Odds
+  API quota), skipped (shown as "N/A") if a team can't be matched by name.
 - **Force refresh** — clears the cache to pull fresh odds immediately
-  (normal auto-refresh is every 5 minutes for odds, 3 minutes for live
+  (normal auto-refresh is every 30 minutes for odds, 5 minutes for live
   scores, to conserve your monthly quota).
 
 ## Free-tier quota notes
 
-The free plan is 500 requests/month; each odds/scores call costs 1 credit
-per region per market. Cached for 3–5 minutes so repeated page interactions
-don't re-spend quota. If you hit the limit, wait for the monthly reset or
-narrow your `regions`/`sports` selection.
+The free plan is 500 credits/month; each odds/scores call costs roughly 1
+credit per region per market requested. **Selecting leagues in the sidebar,
+not sport groups, is what controls spend** — picking "Soccer" alone can mean
+15-20+ leagues if you don't narrow the league list. Cached for 5–30 minutes so
+repeated page interactions and accidental reruns don't re-spend quota. If you
+see "Odds API monthly quota exhausted," that's real — wait for your monthly
+reset (check your account at the-odds-api.com for the exact date), upgrade to
+a paid tier, or narrow `regions`/leagues next session.

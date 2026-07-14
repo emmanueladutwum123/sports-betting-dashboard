@@ -46,37 +46,17 @@ except odds_api.OddsAPIError as e:
     st.error(str(e))
     st.stop()
 
-# --- Sidebar ---
-st.sidebar.header("Filters")
-groups = st.sidebar.multiselect(
-    "Sports", options=list(odds_api.SPORT_GROUPS), default=list(odds_api.SPORT_GROUPS)
-)
-regions = st.sidebar.multiselect(
-    "Bookmaker regions",
-    options=["eu", "uk", "us", "au"],
-    default=["eu"],
-    help="More regions = more books compared, but costs more API quota per refresh.",
-)
-show_live = st.sidebar.checkbox("Show live matches", value=True)
-show_upcoming = st.sidebar.checkbox("Show upcoming fixtures", value=True)
-fetch_form = st.sidebar.checkbox("Include recent-form lookup (slower, best-effort)", value=False)
-if st.sidebar.button("🔄 Force refresh (clears cache)"):
-    st.cache_data.clear()
-
-regions_str = ",".join(regions) if regions else "eu"
-
-
-@st.cache_data(ttl=600, show_spinner="Checking in-season leagues...")
+@st.cache_data(ttl=1800, show_spinner="Checking in-season leagues...")
 def cached_sports_by_group():
     return odds_api.in_season_sports_by_group()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def cached_odds(sport_key: str, regions_arg: str):
     return odds_api.get_odds(sport_key, regions=regions_arg)
 
 
-@st.cache_data(ttl=180, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def cached_scores(sport_key: str):
     return odds_api.get_scores(sport_key, days_from=1)
 
@@ -92,6 +72,37 @@ except odds_api.OddsAPIError as e:
     st.error(str(e))
     st.stop()
 
+# --- Sidebar ---
+st.sidebar.header("Filters")
+st.sidebar.caption(
+    "⚠️ Each league you pick below spends API quota on every uncached refresh "
+    "(free tier: 500 credits/month). Start small."
+)
+groups = st.sidebar.multiselect(
+    "Sports", options=list(odds_api.SPORT_GROUPS), default=["Soccer"]
+)
+regions = st.sidebar.multiselect(
+    "Bookmaker regions",
+    options=["eu", "uk", "us", "au"],
+    default=["eu"],
+    help="More regions = more books compared, but costs more API quota per refresh.",
+)
+show_live = st.sidebar.checkbox("Show live matches", value=True)
+show_upcoming = st.sidebar.checkbox("Show upcoming fixtures", value=True)
+fetch_form = st.sidebar.checkbox("Include recent-form lookup (slower, best-effort)", value=False)
+if st.sidebar.button("🔄 Force refresh (clears cache)"):
+    st.cache_data.clear()
+
+regions_str = ",".join(regions) if regions else "eu"
+
+selected_leagues_by_group = {}
+for group in groups:
+    available = sports_by_group.get(group, [])
+    titles = [l["title"] for l in available]
+    default_titles = titles[:5]
+    chosen = st.sidebar.multiselect(f"{group} leagues", options=titles, default=default_titles)
+    selected_leagues_by_group[group] = chosen
+
 now = datetime.now(timezone.utc)
 
 
@@ -103,10 +114,14 @@ def parse_iso(ts: str):
 
 
 for group in groups:
-    leagues = sports_by_group.get(group, [])
+    chosen_titles = set(selected_leagues_by_group.get(group, []))
+    leagues = [l for l in sports_by_group.get(group, []) if l["title"] in chosen_titles]
     st.header(group)
-    if not leagues:
+    if not sports_by_group.get(group):
         st.info(f"No {group.lower()} leagues currently in-season/tracked by this API.")
+        continue
+    if not leagues:
+        st.caption(f"No {group.lower()} leagues selected — pick some in the sidebar.")
         continue
 
     all_events = []
@@ -156,7 +171,7 @@ for group in groups:
         render.stat_tiles(
             [("Live now", len(live_rows) if show_live else "—"),
              ("Upcoming tracked", len([e for e in all_events if e.get("commence_time")])),
-             ("Leagues in season", len(leagues))]
+             ("Leagues tracked", len(leagues))]
         ),
         unsafe_allow_html=True,
     )
