@@ -20,11 +20,22 @@ class OddsAPIError(Exception):
 
 
 def _api_key() -> str:
-    key = os.environ.get("ODDS_API_KEY", "").strip()
+    """Key from Streamlit secrets (cloud) or the environment/.env (local)."""
+    key = ""
+    try:
+        import streamlit as st
+
+        # st.secrets raises if no secrets file exists at all (normal locally).
+        key = str(st.secrets.get("ODDS_API_KEY", "")).strip()
+    except Exception:
+        key = ""
+    if not key:
+        key = os.environ.get("ODDS_API_KEY", "").strip()
     if not key or key == "your_key_here":
         raise OddsAPIError(
-            "Missing ODDS_API_KEY. Get a free key at https://the-odds-api.com "
-            "and put it in your .env file (see .env.example)."
+            "Missing ODDS_API_KEY. Get a free key at https://the-odds-api.com, then "
+            "put it in your .env file locally (see .env.example), or in "
+            "Settings \u2192 Secrets if you are running this on Streamlit Cloud."
         )
     return key
 
@@ -46,7 +57,10 @@ def _get(path: str, params: dict) -> tuple:
                 "Wait for your monthly reset, upgrade at https://the-odds-api.com, "
                 "or narrow Sports/Regions/Leagues in the sidebar to use less quota."
             )
-        raise OddsAPIError("Odds API rejected the key — check ODDS_API_KEY in .env.")
+        raise OddsAPIError(
+            "Odds API rejected the key — check ODDS_API_KEY in .env (local) "
+            "or in Settings → Secrets (Streamlit Cloud)."
+        )
     if resp.status_code == 422:
         # Unsupported sport/market/region combo for this endpoint — treat as empty.
         return [], resp.headers.get("x-requests-remaining")

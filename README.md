@@ -42,6 +42,33 @@ a fabricated stat).
 4. Open `.env` and paste your key in place of `your_key_here`.
 5. Run `./start.sh` again.
 
+## Deploy it online (Streamlit Community Cloud, free)
+
+Want a shareable URL instead of `localhost`? This repo is deploy-ready:
+
+1. Go to **https://share.streamlit.io** and sign in with GitHub.
+2. **Create app** → **Deploy a public app from GitHub**, and fill in:
+   - Repository: `emmanueladutwum123/sports-betting-dashboard`
+   - Branch: `main`
+   - Main file path: `app.py`
+3. Before clicking Deploy, open **Advanced settings → Secrets** and paste:
+   ```toml
+   ODDS_API_KEY = "your_real_key_here"
+   ```
+   (You can also add this later from the app's ⋮ menu → Settings → Secrets.)
+4. **Deploy.** First build takes a couple of minutes; you get a public URL
+   like `https://<app-name>.streamlit.app`.
+
+Notes for the hosted version:
+
+- The key lives in Streamlit's secrets store, never in the repo — `.gitignore`
+  already excludes `.streamlit/secrets.toml`. See `.streamlit/secrets.toml.example`.
+- **A public app shares your API quota with everyone who opens it.** The free
+  Odds API tier is 500 credits/month, so keep the league selection narrow, or
+  set the app to private (Settings → Sharing) if the quota starts disappearing.
+- Free Cloud apps sleep after ~12 hours idle and wake on the next visit
+  (first load after sleeping is slow, then normal).
+
 ## Running it
 
 ```bash
