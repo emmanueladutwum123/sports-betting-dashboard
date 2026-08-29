@@ -169,6 +169,7 @@ a data-integrity check rather than a profit centre.
 
 | Tab | What it is for |
 |---|---|
+| 🔥 **Daily Card** | The 5 best-evidenced soccer and 5 basketball selections in the next 24–72h, one per competition so the legs stay independent. Three ranking modes (most-likely / best-value / balanced), a liquidity gate, and exact Poisson-binomial accumulator arithmetic. Reports being short rather than padding. |
 | 🎯 **+EV Board** | Every selection priced above fair value, ranked by EV, sized by fractional Kelly, with flags for anything that smells like a data artefact. Often empty. |
 | 🗓️ **Fixtures** | Per-match fair line, best price, book disagreement, and where sharp books disagree with the recreational consensus. |
 | ⚖️ **Arb & Middles** | Riskless positions — and a live integrity check on the feed, since a large "arbitrage" almost always means a stale quote. |
@@ -177,6 +178,42 @@ a data-integrity check rather than a profit centre.
 | 📘 **Methodology** | What every number means and what it cannot do. |
 
 ---
+
+## Why the Daily Card will not promise you winners
+
+The card ranks by the strongest evidence available, and it separates three
+things that all get called "confidence":
+
+- **Confidence the pick wins** — the win probability. Maximised by short-priced
+  favourites, which carry the *worst* value on the board. Backing them all
+  season is a high-strike-rate way to lose slowly.
+- **Confidence the price is wrong in your favour** — expected value. Maximised
+  by selections the market disagrees with, which are usually longshots that lose
+  most of the time.
+- **Confidence in the estimate** — how many books agree, and how tightly. This
+  is a *gate*, not a ranking: ≥8 books, ≤3.5pp disagreement, sharp or consensus
+  anchor. It says nothing about who wins, only how much to trust the other two.
+
+You pick which of the first two to rank by. Both are honest; they answer
+different questions, and the tab says so in the UI rather than hiding it.
+
+### The accumulator arithmetic
+
+Because the card deliberately spans different countries, its legs are close to
+independent — which is exactly what makes combining them a bad idea. Independent
+probabilities multiply:
+
+- 10 legs at 75% each → **5.6%** chance all land.
+- A real card of 6 legs averaging 73% → **15.7%**, with ~4.4 expected winners.
+
+Expected value alone does **not** condemn parlays, and the tab does not pretend
+it does: EV compounds as `∏(1+eᵢ)−1`, so combining genuinely +EV legs *raises*
+the EV. The decisive argument is growth. Kelly growth is additive across
+independent bets and brutally concave in a single one, so backing the legs
+separately dominates parlaying them — measured at **~30× the log-growth rate**
+on a real card, even in the case where the parlay's EV was the higher number.
+
+That is why accumulators are the most profitable product a sportsbook sells.
 
 ## Setup
 

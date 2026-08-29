@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from src import arbitrage, form, ledger, odds_api, picks, render  # noqa: E402
+from src import arbitrage, daily, form, ledger, odds_api, picks, render  # noqa: E402
 from src.devig import METHODS  # noqa: E402
 from src.edge import DEFAULT_EXPOSURE_CAP, DEFAULT_KELLY_FRACTION, DEFAULT_SHRINK_K  # noqa: E402
 
@@ -60,6 +60,14 @@ def cached_scores(sport_key: str):
 @st.cache_data(ttl=1800, show_spinner=False)
 def cached_form(team_name: str):
     return form.get_form(team_name)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_h2h(sport_key: str, regions_arg: str):
+    """Head-to-head only. The Odds API bills one credit per region per market
+    per league, so restricting the card to h2h and a single region is the
+    difference between 1 credit a league and 4."""
+    return odds_api.get_odds(sport_key, regions=regions_arg, markets="h2h")
 
 
 @st.cache_resource(show_spinner="Fetching historical results...")
@@ -176,9 +184,244 @@ events, quota_left = ([], None)
 if groups and any(t for _, t in leagues_key):
     events, quota_left = load_events(tuple(groups), leagues_key, regions_str)
 
-tab_ev, tab_fix, tab_arb, tab_model, tab_ledger, tab_docs = st.tabs(
-    ["🎯 +EV Board", "🗓️ Fixtures", "⚖️ Arb & Middles", "🧪 Model Lab", "📒 Ledger & CLV", "📘 Methodology"]
+tab_card, tab_ev, tab_fix, tab_arb, tab_model, tab_ledger, tab_docs = st.tabs(
+    ["🔥 Daily Card", "🎯 +EV Board", "🗓️ Fixtures", "⚖️ Arb & Middles", "🧪 Model Lab",
+     "📒 Ledger & CLV", "📘 Methodology"]
 )
+
+# ============================================================== DAILY CARD ===
+with tab_card:
+    st.subheader("Today's strongest selections")
+    st.caption(
+        "The best-evidenced head-to-head selections across many competitions, one per "
+        "league. Built only from markets where enough books agree that the fair price "
+        "means something."
+    )
+
+    CARD_SOCCER = {
+        "soccer_epl": "EPL", "soccer_germany_bundesliga": "Bundesliga",
+        "soccer_spain_la_liga": "La Liga", "soccer_italy_serie_a": "Serie A",
+        "soccer_france_ligue_one": "Ligue 1", "soccer_usa_mls": "MLS",
+        "soccer_argentina_primera_division": "Argentina Primera",
+        "soccer_brazil_campeonato": "Brazil Serie A",
+        "soccer_netherlands_eredivisie": "Eredivisie",
+        "soccer_portugal_primeira_liga": "Primeira Liga",
+        "soccer_mexico_ligamx": "Liga MX", "soccer_efl_champ": "Championship",
+        "soccer_turkey_super_league": "Turkey Super Lig",
+        "soccer_belgium_first_div": "Belgium First Div",
+        "soccer_japan_j_league": "J League", "soccer_spl": "Scottish Premiership",
+        "soccer_saudi_arabia_pro_league": "Saudi Pro League",
+        "soccer_switzerland_superleague": "Swiss Superleague",
+    }
+    CARD_BASKET = {
+        "basketball_nba": "NBA", "basketball_wnba": "WNBA",
+        "basketball_euroleague": "EuroLeague",
+    }
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        mode = st.selectbox(
+            "Rank selections by", list(daily.MODES),
+            index=list(daily.MODES).index(daily.DEFAULT_MODE),
+            format_func=lambda m: daily.MODES[m]["label"],
+        )
+        st.caption(daily.MODES[mode]["help"])
+    with c2:
+        window = st.selectbox("Time window", [24, 48, 72],
+                              format_func=lambda h: f"Next {h}h")
+    with c3:
+        per_sport = st.number_input("Picks per sport", 1, 10, 5)
+
+    chosen_soccer = st.multiselect(
+        "Soccer competitions to scan", list(CARD_SOCCER),
+        default=list(CARD_SOCCER)[:10], format_func=lambda k: CARD_SOCCER[k],
+    )
+    chosen_basket = st.multiselect(
+        "Basketball competitions to scan", list(CARD_BASKET),
+        default=list(CARD_BASKET), format_func=lambda k: CARD_BASKET[k],
+    )
+
+    n_leagues = len(chosen_soccer) + len(chosen_basket)
+    card_regions = st.radio(
+        "Bookmaker regions for the card", ["eu", "eu,uk", "eu,uk,us"],
+        horizontal=True, index=0,
+        help="Each extra region multiplies the credit cost. 'eu' alone already "
+             "includes Pinnacle and the exchanges, which is what anchors the fair price.",
+    )
+    cost = n_leagues * len(card_regions.split(","))
+    st.caption(
+        f"Scanning **{n_leagues} competitions** across **{len(card_regions.split(','))} "
+        f"region(s)** costs about **{cost} API credits** per uncached build "
+        "(free tier: 500/month, cached 15 min)."
+    )
+
+    if st.button("🔥 Build the card", type="primary"):
+        st.session_state["card_request"] = (
+            tuple(chosen_soccer), tuple(chosen_basket), card_regions, mode, window, per_sport
+        )
+
+    if st.session_state.get("card_request"):
+        soc_keys, bk_keys, regs, mode_sel, win_sel, n_sel = st.session_state["card_request"]
+
+        def gather(keys, titles):
+            out = []
+            for key in keys:
+                try:
+                    found, _ = cached_h2h(key, regs)
+                except odds_api.OddsAPIError as exc:
+                    st.warning(f"{titles.get(key, key)}: {exc}")
+                    continue
+                for e in found:
+                    e["_league"] = titles.get(key, key)
+                    out.append(e)
+            return out
+
+        soccer_events = gather(soc_keys, CARD_SOCCER)
+        basket_events = gather(bk_keys, CARD_BASKET)
+
+        cards = [
+            ("⚽ Soccer", daily.build_card(soccer_events, "Soccer", n_sel, mode_sel, win_sel)),
+            ("🏀 Basketball", daily.build_card(basket_events, "Basketball", n_sel, mode_sel, win_sel)),
+        ]
+
+        all_selected = []
+        for heading, card in cards:
+            st.markdown(f"### {heading}")
+            sels = card["selections"]
+
+            if not sels:
+                st.warning(
+                    f"**No qualifying {card['sport'].lower()} selection in the next "
+                    f"{card['window_hours']}h.** {card['events_in_window']} games fell in "
+                    f"the window; {card['passed_quality_gate']} of {card['candidates']} "
+                    "candidate selections had enough book agreement to price confidently. "
+                    "An empty card is a real answer — it is not padded."
+                )
+                continue
+
+            st.markdown(
+                render.stat_tiles([
+                    ("Selections", f"{len(sels)}/{card['requested']}"),
+                    ("Competitions", len({s.league for s in sels})),
+                    ("Avg win prob", f"{sum(s.fair_prob for s in sels) / len(sels) * 100:.0f}%"),
+                    ("Avg EV", f"{sum(s.ev for s in sels) / len(sels) * 100:+.2f}%"),
+                    ("Games in window", card["events_in_window"]),
+                ]),
+                unsafe_allow_html=True,
+            )
+            if card["short_by"]:
+                st.info(
+                    f"Only **{len(sels)}** of the {card['requested']} requested cleared the "
+                    f"evidence bar (needs ≥{daily.MIN_BOOKS} books, ≤"
+                    f"{daily.MAX_DISPERSION * 100:.1f}pp disagreement, one pick per league). "
+                    "Filling the gap with weaker selections would make the card look "
+                    "complete and be worth less."
+                )
+
+            rows = []
+            for s in sels:
+                row = s.as_row()
+                row["Starts"] = fmt_when(row["Starts"])
+                rows.append(row)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+            for s in sels:
+                verdict = (
+                    "priced in your favour" if s.ev > 0.01
+                    else "priced about fairly" if s.ev > -0.01
+                    else "priced against you — you are paying for the safety"
+                )
+                st.markdown(
+                    f"- **{s.selection}** vs {s.opponent} ({s.league}) — "
+                    f"**{s.fair_prob * 100:.0f}%** to win "
+                    f"(conservatively {s.shrunk_prob * 100:.0f}%), best price **{s.odds}** "
+                    f"at {s.book} against a fair {s.fair_odds:.2f}: {verdict}. "
+                    f"{s.n_books} books, {s.sigma * 100:.1f}pp disagreement."
+                )
+            all_selected.extend(sels)
+            st.divider()
+
+        if all_selected:
+            st.markdown("### 🧮 If you combine them")
+            par = daily.parlay_analysis(all_selected)
+            st.markdown(
+                render.stat_tiles([
+                    ("Legs", par["n"]),
+                    ("Accumulator odds", f"{par['combined_odds']:.0f}"),
+                    ("All legs land", f"{par['all_win_prob'] * 100:.2f}%"),
+                    ("Expected winners", f"{par['expected_winners']:.1f}"),
+                    ("Parlay EV", f"{par['parlay_ev'] * 100:+.1f}%"),
+                ]),
+                unsafe_allow_html=True,
+            )
+            growth_line = (
+                f"backing them singly compounds your bankroll about "
+                f"**{par['growth_ratio']:.0f}x faster** than the parlay"
+                if par.get("growth_ratio") and par["growth_ratio"] > 1
+                else "backing them singly is the better-growing option"
+            )
+            ev_line = (
+                f"The accumulator's expected value is **{par['parlay_ev'] * 100:+.1f}%**. "
+                "That is *higher* than the legs average individually — expected value "
+                "compounds in both directions, so combining genuinely +EV legs does raise "
+                "it. That is not a reason to parlay."
+                if par["parlay_ev"] > par["singles_avg_ev"]
+                else
+                f"The accumulator's expected value is **{par['parlay_ev'] * 100:+.1f}%** "
+                f"against **{par['singles_avg_ev'] * 100:+.2f}%** for the same legs backed "
+                "singly — each leg's margin compounds into the price of the whole bet."
+            )
+            st.error(
+                f"**Back these as {par['n']} separate bets, not one accumulator.** "
+                f"The legs sit in different countries and competitions, so they are "
+                f"near-independent — and independent probabilities multiply. All "
+                f"{par['n']} landing is **{par['all_win_prob'] * 100:.2f}%**; you should "
+                f"expect about **{par['expected_winners']:.1f} winners, not {par['n']}**, "
+                f"and the parlay returns nothing at all "
+                f"**{par['lose_everything_prob'] * 100:.0f}%** of the time.\n\n"
+                f"{ev_line}\n\n"
+                f"The decisive number is growth, not EV: at each bet's own optimal stake, "
+                f"{growth_line}. A parlay throws away the diversification that makes "
+                "independent bets compound, which is why accumulators are the most "
+                "profitable product a sportsbook sells."
+            )
+
+            dist = par["distribution"]
+            st.markdown("**Exact distribution of how many legs win** (Poisson-binomial):")
+            st.dataframe(
+                pd.DataFrame([
+                    {"Winners": k, "Probability %": round(p * 100, 2),
+                     "At least this many %": round(sum(dist[k:]) * 100, 2)}
+                    for k, p in enumerate(dist)
+                ]),
+                width="stretch", hide_index=True,
+            )
+
+            st.markdown("### 💷 Backing them as singles")
+            stake_rows = []
+            for s in all_selected:
+                from src.edge import kelly_fraction
+                f = kelly_fraction(s.shrunk_prob, s.odds) * kelly_mult
+                stake_rows.append({
+                    "Selection": f"{s.selection} ({s.league})",
+                    "Odds": s.odds, "EV %": round(s.ev * 100, 2),
+                    "Stake %": round(f * 100, 2), "Stake": round(bankroll * f, 2),
+                })
+            total_f = sum(r["Stake %"] for r in stake_rows) / 100
+            st.dataframe(pd.DataFrame(stake_rows), width="stretch", hide_index=True)
+            if total_f == 0:
+                st.info(
+                    "Every stake is zero: at these prices no selection survives the "
+                    "uncertainty shrinkage, so Kelly sizes them at nothing. In the "
+                    "'most likely to win' mode that is expected — those are the safest "
+                    "outcomes, and safety is exactly what the market charges most for."
+                )
+            else:
+                st.caption(
+                    f"Total {total_f * 100:.2f}% of bankroll at quarter-Kelly on the "
+                    "conservative probability. Sized individually, not as one bet."
+                )
+
 
 # =============================================================== +EV BOARD ===
 with tab_ev:
