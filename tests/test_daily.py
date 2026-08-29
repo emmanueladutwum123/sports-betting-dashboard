@@ -212,3 +212,15 @@ def test_summary_of_an_empty_card_says_so():
 def test_every_mode_is_documented():
     for _name, meta in MODES.items():
         assert meta["label"] and meta["help"]
+
+
+def test_a_longshot_parlay_is_not_reported_as_certain_loss():
+    """Guards a display bug found live: a 5-leg value parlay busts 99.985% of
+    the time, and rounding that to '100%' reads as certainty."""
+    class L:
+        def __init__(self, p, o):
+            self.fair_prob, self.odds, self.ev, self.shrunk_prob = p, o, p * o - 1, p - 0.01
+    par = parlay_analysis([L(0.20, 5.2) for _ in range(5)])
+    assert par["lose_everything_prob"] < 1.0
+    assert f"{par['lose_everything_prob'] * 100:.0f}%" == "100%"   # the naive format lies
+    assert par["all_win_prob"] > 0

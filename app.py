@@ -145,6 +145,17 @@ if st.sidebar.button("🔄 Force refresh (clears cache)"):
     st.cache_data.clear()
 
 
+def _pct_near_one(p: float) -> str:
+    """Format a probability that may sit very close to 1 without rounding to
+    '100%'. A 5-leg longshot parlay busts 99.985% of the time; printing that as
+    100% reads as certainty and is the kind of small dishonesty this whole app
+    is built to avoid."""
+    pct = p * 100
+    if pct >= 99.95:
+        return f">{min(pct, 99.99):.2f}%"
+    return f"{pct:.1f}%"
+
+
 def parse_iso(ts: str):
     try:
         return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
@@ -378,7 +389,7 @@ with tab_card:
                 f"{par['n']} landing is **{par['all_win_prob'] * 100:.2f}%**; you should "
                 f"expect about **{par['expected_winners']:.1f} winners, not {par['n']}**, "
                 f"and the parlay returns nothing at all "
-                f"**{par['lose_everything_prob'] * 100:.0f}%** of the time.\n\n"
+                f"**{_pct_near_one(par['lose_everything_prob'])}** of the time.\n\n"
                 f"{ev_line}\n\n"
                 f"The decisive number is growth, not EV: at each bet's own optimal stake, "
                 f"{growth_line}. A parlay throws away the diversification that makes "
