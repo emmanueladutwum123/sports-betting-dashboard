@@ -1,139 +1,310 @@
-"""Turns a raw Odds API event into a market summary + a defensible recommended
-pick, following the user's saved methodology:
-  - never the extreme end of an O/U board — pick the "balance point" line
-    (where Over/Under are closest to a fair 50/50), which naturally avoids
-    both the cheap near-certain Over and the juicy-looking extreme Under.
-  - state a confidence rating from real market liquidity, not vibes.
-  - if a market isn't quoted by any book, say so — never invent a number.
+"""Turning a raw odds feed into ranked, sized, defensible betting opportunities.
+
+What changed and why
+--------------------
+The first version of this module picked the *balance-point* Over/Under line --
+the line closest to a fair 50/50 -- on the reasoning that it avoided both the
+cheap near-certain end and the flashy extreme end of the board. That is sound
+risk instinct and it is also, unfortunately, an anti-strategy. The balance-point
+line is where the market has the *most* information and the least disagreement;
+picking it maximises variance while guaranteeing an expected return of exactly
+minus the vig. There is no line on a board that is inherently good to bet. Only
+a line that is *mispriced relative to its fair value* is good to bet.
+
+So this module now asks a different question. For every selection at every book:
+
+1. Build a fair probability from the other books, de-vigged per book with Shin's
+   method, pooled in log-odds space, weighted toward sharp books, and explicitly
+   excluding the book being evaluated.
+2. Compare the offered price to that fair probability. The difference is the
+   edge; the edge times the price is the expected value.
+3. Size it with fractional Kelly on a *shrunk* probability, where the shrinkage
+   comes from how much the books actually disagree.
+4. Flag everything that smells like a data artefact rather than an edge.
+
+The output is ranked by expected value, and it is frequently empty. An empty
+board is the correct output on most days: it means no book is currently offering
+a price meaningfully better than the market's own consensus, which is the normal
+state of a market that works.
 """
-from src.probability import confidence_stars, devig, fmt_stars
+
+from __future__ import annotations
+
+from src.devig import DEFAULT_METHOD
+from src.edge import (
+    DEFAULT_EXPOSURE_CAP,
+    DEFAULT_KELLY_FRACTION,
+    DEFAULT_SHRINK_K,
+    MIN_EV_THRESHOLD,
+    Opportunity,
+    classify,
+    evaluate,
+    normalise_slate,
+)
+from src.market import MarketView, dispersion, is_sharp
+from src.probability import confidence_stars, fmt_stars
+
+# Markets scanned by default. Totals are enumerated per distinct line.
+SCAN_MARKETS = ("h2h", "totals")
 
 
-def _collect_h2h(event: dict) -> dict:
-    """{'Team A': [(book_title, price), ...], ...}"""
-    per_outcome = {}
-    for bm in event.get("bookmakers", []):
-        for market in bm.get("markets", []):
-            if market.get("key") != "h2h":
-                continue
-            for outcome in market.get("outcomes", []):
-                per_outcome.setdefault(outcome["name"], []).append(
-                    (bm.get("title", bm.get("key", "?")), outcome["price"])
-                )
-    return per_outcome
-
-
-def _collect_totals(event: dict) -> dict:
-    """{point: {'Over': [(book,price)], 'Under': [(book,price)]}}"""
-    lines: dict = {}
-    for bm in event.get("bookmakers", []):
-        for market in bm.get("markets", []):
+def _totals_lines(event: dict) -> list:
+    lines = set()
+    for bm in event.get("bookmakers", []) or []:
+        for market in bm.get("markets", []) or []:
             if market.get("key") != "totals":
                 continue
-            for outcome in market.get("outcomes", []):
-                point = outcome.get("point")
-                side = outcome["name"]
-                lines.setdefault(point, {"Over": [], "Under": []})
-                lines[point][side].append(
-                    (bm.get("title", bm.get("key", "?")), outcome["price"])
+            for outcome in market.get("outcomes", []) or []:
+                if outcome.get("point") is not None:
+                    lines.add(outcome["point"])
+    return sorted(lines)
+
+
+def scan_event(
+    event: dict,
+    min_ev: float = MIN_EV_THRESHOLD,
+    devig_method: str = DEFAULT_METHOD,
+    kelly_multiplier: float = DEFAULT_KELLY_FRACTION,
+    shrink_k: float = DEFAULT_SHRINK_K,
+    model_probs: dict | None = None,
+    include_negative: bool = False,
+) -> list:
+    """Every +EV selection on one event, ranked by expected value.
+
+    ``model_probs`` optionally supplies an independent forecast keyed by market
+    (``{"h2h": {...}, "totals_2.5": {...}}``); when present it is already
+    expected to have been blended with the market by the caller, so it simply
+    replaces the anchor for those outcomes.
+    """
+    views = [("h2h", None, MarketView(event, "h2h", None, devig_method))]
+    for line in _totals_lines(event):
+        views.append(("totals", line, MarketView(event, "totals", line, devig_method)))
+
+    found = []
+    for market_key, point, view in views:
+        if view.n_books < 2:
+            continue
+        model_key = market_key if point is None else f"{market_key}_{point}"
+        model_for_market = (model_probs or {}).get(model_key)
+
+        for quote in view.quotes:
+            anchor = view.anchor(exclude_book=quote.key)
+            if not anchor:
+                continue
+            if model_for_market:
+                anchor = {k: model_for_market.get(k, v) for k, v in anchor.items()}
+
+            for selection, price in quote.prices.items():
+                fair = anchor.get(selection)
+                if not fair:
+                    continue
+                sigma = dispersion(view.quotes, selection)
+                metrics = evaluate(fair, price, sigma, kelly_multiplier, shrink_k)
+                if not include_negative and metrics["ev"] < min_ev:
+                    continue
+
+                found.append(
+                    Opportunity(
+                        event_id=event.get("id"),
+                        commence_time=event.get("commence_time"),
+                        league=event.get("_league"),
+                        home=event.get("home_team"),
+                        away=event.get("away_team"),
+                        market=market_key,
+                        point=point,
+                        selection=selection,
+                        book_key=quote.key,
+                        book_title=quote.title,
+                        odds=price,
+                        fair_prob=fair,
+                        shrunk_prob=metrics["shrunk_prob"],
+                        model_prob=(model_for_market or {}).get(selection),
+                        sigma=sigma,
+                        n_books=view.n_books,
+                        anchor_quality=view.anchor_quality(),
+                        ev=metrics["ev"],
+                        edge=metrics["edge"],
+                        kelly=metrics["kelly"],
+                        stake_fraction=metrics["stake_fraction"],
+                        flags=classify(metrics["ev"], sigma, view.n_books, view.anchor_quality()),
+                    )
                 )
-    return lines
+
+    found.sort(key=lambda o: -(o.ev or 0))
+    return found
 
 
-def summarize_h2h(event: dict) -> dict | None:
-    """Returns {'outcomes': {team: {...}}, 'stars': n, 'book_count': n}, or None
-    if no book quotes this event's moneyline/1X2 at all."""
-    per_outcome = _collect_h2h(event)
-    if not per_outcome:
+def scan_slate(
+    events: list,
+    min_ev: float = MIN_EV_THRESHOLD,
+    devig_method: str = DEFAULT_METHOD,
+    kelly_multiplier: float = DEFAULT_KELLY_FRACTION,
+    shrink_k: float = DEFAULT_SHRINK_K,
+    exposure_cap: float = DEFAULT_EXPOSURE_CAP,
+    drop_flagged: bool = True,
+) -> list:
+    """Scan many events and size the whole slate against one bankroll."""
+    out = []
+    for event in events:
+        out.extend(scan_event(event, min_ev, devig_method, kelly_multiplier, shrink_k))
+    if drop_flagged:
+        out = [o for o in out if not any(f.startswith("implausible-EV") for f in o.flags)]
+    out.sort(key=lambda o: -(o.ev or 0))
+    return normalise_slate(out, exposure_cap)
+
+
+# --------------------------------------------------------------------------
+# Per-event summaries used by the fixture cards. Same shapes as before so the
+# renderer is unchanged, but the numbers underneath are now built the right way:
+# each book de-vigged separately, pooled in log-odds space, sharp-anchored.
+# --------------------------------------------------------------------------
+
+def summarize_h2h(event: dict, devig_method: str = DEFAULT_METHOD) -> dict | None:
+    view = MarketView(event, "h2h", None, devig_method)
+    if not view.quotes:
         return None
-
-    names = list(per_outcome.keys())
-    avg_odds = [sum(p for _, p in per_outcome[n]) / len(per_outcome[n]) for n in names]
-    fair_probs = devig(avg_odds)
-
-    book_counts = [len(per_outcome[n]) for n in names]
-    total_books = max(book_counts) if book_counts else 0
+    anchor = view.anchor()
+    if not anchor:
+        return None
 
     outcomes = {}
-    for name, avg, fair, quotes in zip(names, avg_odds, fair_probs, [per_outcome[n] for n in names]):
-        best_book, best_price = max(quotes, key=lambda x: x[1])
+    for name, fair in anchor.items():
+        prices = [(q.title, q.prices[name]) for q in view.quotes if name in q.prices]
+        if not prices:
+            continue
+        best_book, best_price = max(prices, key=lambda x: x[1])
         outcomes[name] = {
-            "avg_odds": round(avg, 2),
-            "fair_prob": round(fair, 3) if fair is not None else None,
+            "fair_prob": round(fair, 4),
+            "fair_odds": round(1.0 / fair, 2) if fair else None,
+            "avg_odds": round(len(prices) / sum(1.0 / p for _, p in prices), 2),
             "best_odds": best_price,
             "best_book": best_book,
-            "book_count": len(quotes),
+            "book_count": len(prices),
+            # Positive means the best available price beats fair value.
+            "best_ev_pct": round((best_price * fair - 1.0) * 100, 2),
+            "dispersion_pp": round(dispersion(view.quotes, name) * 100, 2),
         }
-    return {"outcomes": outcomes, "stars": confidence_stars(total_books), "book_count": total_books}
-
-
-def pick_total_line(event: dict) -> dict | None:
-    """Balance-point O/U line selection. Returns None if no totals quoted."""
-    lines = _collect_totals(event)
-    candidates = []
-    for point, sides in lines.items():
-        if not sides["Over"] or not sides["Under"]:
-            continue
-        avg_over = sum(p for _, p in sides["Over"]) / len(sides["Over"])
-        avg_under = sum(p for _, p in sides["Under"]) / len(sides["Under"])
-        fair_over, fair_under = devig([avg_over, avg_under])
-        if fair_over is None:
-            continue
-        best_over = max(sides["Over"], key=lambda x: x[1])
-        best_under = max(sides["Under"], key=lambda x: x[1])
-        book_count = min(len(sides["Over"]), len(sides["Under"]))
-        candidates.append(
-            {
-                "point": point,
-                "fair_over": round(fair_over, 3),
-                "fair_under": round(fair_under, 3),
-                "avg_over_odds": round(avg_over, 2),
-                "avg_under_odds": round(avg_under, 2),
-                "best_over_odds": best_over[1],
-                "best_over_book": best_over[0],
-                "best_under_odds": best_under[1],
-                "best_under_book": best_under[0],
-                "book_count": book_count,
-                "balance_gap": abs(fair_over - 0.5),
-            }
-        )
-    if not candidates:
+    if not outcomes:
         return None
-    candidates.sort(key=lambda c: c["balance_gap"])
-    chosen = candidates[0]
-    chosen["side"] = "Over" if chosen["fair_over"] >= chosen["fair_under"] else "Under"
-    chosen["all_lines_considered"] = sorted(c["point"] for c in candidates)
-    chosen["stars"] = confidence_stars(chosen["book_count"])
-    return chosen
+    return {
+        "outcomes": outcomes,
+        "stars": confidence_stars(view.n_books),
+        "book_count": view.n_books,
+        "anchor": view.anchor_quality(),
+        "sharp_books": view.sharp_books,
+        "avg_margin_pct": round(
+            100 * sum(q.margin for q in view.quotes) / len(view.quotes), 2
+        ),
+    }
+
+
+def best_total_bet(event: dict, devig_method: str = DEFAULT_METHOD) -> dict | None:
+    """The totals line and side with the best expected value, not the flattest.
+
+    Returns the same keys the fixture card expects, plus the EV that justifies
+    the selection. Returns ``None`` when no totals line offers positive EV --
+    which is the honest answer far more often than not.
+    """
+    best = None
+    for line in _totals_lines(event):
+        view = MarketView(event, "totals", line, devig_method)
+        if view.n_books < 2:
+            continue
+        anchor = view.anchor()
+        if not anchor:
+            continue
+
+        entry = {"point": line, "book_count": view.n_books, "stars": confidence_stars(view.n_books)}
+        for side in ("Over", "Under"):
+            prices = [(q.title, q.prices[side]) for q in view.quotes if side in q.prices]
+            if not prices:
+                break
+            book, price = max(prices, key=lambda x: x[1])
+            fair = anchor.get(side)
+            if not fair:
+                break
+            entry[f"fair_{side.lower()}"] = round(fair, 4)
+            entry[f"best_{side.lower()}_odds"] = price
+            entry[f"best_{side.lower()}_book"] = book
+            entry[f"ev_{side.lower()}"] = price * fair - 1.0
+        else:
+            side = "Over" if entry["ev_over"] >= entry["ev_under"] else "Under"
+            entry["side"] = side
+            entry["ev"] = entry[f"ev_{side.lower()}"]
+            if best is None or entry["ev"] > best["ev"]:
+                best = entry
+
+    if best is None:
+        return None
+    best["ev_pct"] = round(best["ev"] * 100, 2)
+    best["positive_ev"] = best["ev"] > 0
+    return best
+
+
+# Kept under the old name so existing callers keep working.
+pick_total_line = best_total_bet
 
 
 def build_verdict(event: dict, h2h_summary: dict | None, total_pick: dict | None) -> str:
-    """Plain-language verdict line combining the moneyline/1X2 favorite and the
-    balance-point total, mirroring the saved analyst methodology's output style."""
+    """One-line plain-language read of the event."""
     home, away = event.get("home_team"), event.get("away_team")
     parts = []
 
     if h2h_summary:
-        favorite = max(h2h_summary["outcomes"].items(), key=lambda kv: (kv[1]["fair_prob"] or 0))
-        fav_name, fav_data = favorite
-        pct = round((fav_data["fair_prob"] or 0) * 100)
+        fav_name, fav = max(
+            h2h_summary["outcomes"].items(), key=lambda kv: (kv[1]["fair_prob"] or 0)
+        )
+        pct = round((fav["fair_prob"] or 0) * 100)
+        ev = fav["best_ev_pct"]
+        verdict = f"+{ev:.1f}% EV at that price" if ev > 0 else "no value at any listed price"
         parts.append(
-            f"{fav_name} favored (~{pct}% market-implied) — best price {fav_data['best_odds']} "
-            f"@ {fav_data['best_book']} {fmt_stars(h2h_summary['stars'])}"
+            f"{fav_name} ~{pct}% fair (anchor: {h2h_summary['anchor']}, "
+            f"{h2h_summary['book_count']} books, avg margin {h2h_summary['avg_margin_pct']}%) — "
+            f"best {fav['best_odds']} @ {fav['best_book']}, {verdict} "
+            f"{fmt_stars(h2h_summary['stars'])}"
         )
     else:
-        parts.append("No moneyline/1X2 odds quoted by any tracked book — skip this market.")
+        parts.append("No moneyline/1X2 priced — skip.")
 
     if total_pick:
-        side = total_pick["side"]
-        pct = round((total_pick["fair_over"] if side == "Over" else total_pick["fair_under"]) * 100)
-        odds = total_pick["best_over_odds"] if side == "Over" else total_pick["best_under_odds"]
-        book = total_pick["best_over_book"] if side == "Over" else total_pick["best_under_book"]
-        parts.append(
-            f"{side} {total_pick['point']} the balance-point line (~{pct}% fair) — "
-            f"best price {odds} @ {book} {fmt_stars(total_pick['stars'])}"
-        )
+        ev = total_pick["ev_pct"]
+        if total_pick["positive_ev"]:
+            odds = total_pick[f"best_{total_pick['side'].lower()}_odds"]
+            book = total_pick[f"best_{total_pick['side'].lower()}_book"]
+            parts.append(
+                f"{total_pick['side']} {total_pick['point']} is the only +EV total "
+                f"(+{ev:.1f}%) — {odds} @ {book}"
+            )
+        else:
+            parts.append(f"No totals line offers value (best is {ev:.1f}% EV) — skip.")
     else:
-        parts.append("No totals market quoted — skip O/U on this one.")
+        parts.append("No totals priced — skip.")
 
     return f"{home} vs {away}: " + " | ".join(parts)
+
+
+def sharp_disagreement(event: dict) -> dict | None:
+    """Where sharp books and soft books disagree most on the same market.
+
+    A large, persistent gap between the sharp anchor and the recreational
+    consensus is the cleanest structural signal available in a public odds feed:
+    the soft side is shaded toward public sentiment, and the sharp side is where
+    the money is. Bets are found on the soft side of that gap.
+    """
+    view = MarketView(event, "h2h")
+    if not view.sharp or view.n_books < 3:
+        return None
+    from src.market import pool_fair_probs
+
+    soft = pool_fair_probs([q for q in view.quotes if not is_sharp(q.key)])
+    if not soft:
+        return None
+    gaps = {name: view.sharp[name] - soft.get(name, view.sharp[name]) for name in view.sharp}
+    biggest = max(gaps, key=lambda n: abs(gaps[n]))
+    return {
+        "selection": biggest,
+        "sharp_prob": round(view.sharp[biggest], 4),
+        "soft_prob": round(soft.get(biggest, 0.0), 4),
+        "gap_pp": round(gaps[biggest] * 100, 2),
+        "sharp_books": view.sharp_books,
+    }

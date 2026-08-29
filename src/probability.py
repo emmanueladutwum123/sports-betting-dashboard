@@ -1,41 +1,31 @@
-"""Pure math: implied probability, de-vig (overround removal), confidence rating.
+"""Compatibility shim plus the market-liquidity confidence rating.
 
-No fabricated numbers here — every probability is derived directly from real
-quoted odds. Confidence reflects market liquidity/agreement (how many books
-quote it, how much they agree), not certainty of the outcome.
+The probability mathematics that used to live here now lives in :mod:`src.devig`
+(five de-vig methods instead of one) and :mod:`src.market` (aggregation across
+books). This module re-exports the old names so nothing breaks, and keeps the
+confidence rating, which is about market structure rather than probability.
 """
 
+from src.devig import devig, implied_prob  # noqa: F401  (re-exported)
 
-def implied_prob(decimal_odds: float) -> float | None:
-    if not decimal_odds or decimal_odds <= 1:
-        return None
-    return 1.0 / decimal_odds
-
-
-def devig(decimal_odds_list: list) -> list:
-    """Remove the bookmaker overround so probabilities sum to 1.
-
-    decimal_odds_list: odds for mutually-exclusive outcomes of ONE market
-    (e.g. [home, draw, away] or [over, under]).
-    """
-    raw = [implied_prob(o) for o in decimal_odds_list]
-    total = sum(p for p in raw if p is not None)
-    if not total:
-        return [None] * len(decimal_odds_list)
-    return [(p / total) if p is not None else None for p in raw]
+__all__ = ["implied_prob", "devig", "confidence_stars", "fmt_stars"]
 
 
 def confidence_stars(book_count: int) -> int:
-    """1-5 stars from how many independent bookmakers quote the market.
-    More books quoting = more liquid/agreed-upon price = higher confidence
-    in the probability estimate itself (NOT in the bet winning)."""
-    if book_count >= 6:
+    """1-5 stars from how many independent books quote the market.
+
+    This rates the *estimate*, not the bet. More books quoting means a more
+    liquid market and a tighter fair-value estimate. It says nothing about
+    whether the selection wins, and a five-star rating on a -4% EV price is
+    still a bad bet.
+    """
+    if book_count >= 8:
         return 5
-    if book_count >= 4:
+    if book_count >= 6:
         return 4
-    if book_count >= 2:
+    if book_count >= 4:
         return 3
-    if book_count == 1:
+    if book_count >= 2:
         return 2
     return 1
 

@@ -1,10 +1,18 @@
-"""Betting research dashboard — live scores + upcoming fixtures across soccer,
-basketball, baseball, cricket, with de-vigged market-implied probabilities and
-a defensible recommended pick per game (never the extreme end of an O/U board).
+"""Quantitative betting research dashboard.
 
-Run: ./start.sh   (or `streamlit run app.py` once .env has ODDS_API_KEY set)
+Six tabs, in the order you should actually use them:
+
++EV Board      every selection currently priced above its fair value, ranked by
+               expected value and sized by fractional Kelly.
+Fixtures       per-match breakdown: fair line, best price, book disagreement.
+Arb & Middles  riskless-ish positions, and a live integrity check on the feed.
+Model Lab      fit Dixon-Coles on real historical results and price any matchup.
+Ledger & CLV   log what you bet, grade yourself on closing line value.
+Methodology    what the numbers mean and what they cannot do.
+
+Run: ./start.sh   (or `streamlit run app.py` with ODDS_API_KEY set)
 """
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -12,33 +20,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from src import form, odds_api, picks, render  # noqa: E402  (must follow load_dotenv())
-from src.probability import fmt_stars  # noqa: E402
+from src import arbitrage, form, ledger, odds_api, picks, render  # noqa: E402
+from src.devig import METHODS  # noqa: E402
+from src.edge import DEFAULT_EXPOSURE_CAP, DEFAULT_KELLY_FRACTION, DEFAULT_SHRINK_K  # noqa: E402
 
-st.set_page_config(page_title="Betting Research Dashboard", layout="wide", page_icon="📊")
+st.set_page_config(page_title="Quant Betting Research", layout="wide", page_icon="📊")
 st.markdown(render.inject_css(), unsafe_allow_html=True)
 
-st.title("📊 Betting Research Dashboard")
+st.title("📊 Quantitative Betting Research")
 st.caption(
-    "Live scores + upcoming fixtures across soccer, basketball, baseball, and cricket, "
-    "with market-implied probabilities and a defensible recommended pick per game."
+    "Fair prices from per-book Shin de-vigging pooled in log-odds space and anchored "
+    "to sharp books · expected value and fractional-Kelly sizing · closing-line-value "
+    "tracking · Dixon-Coles goal model with a walk-forward backtest."
 )
-
-with st.expander("⚠️ Read before using", expanded=False):
-    st.markdown(
-        "- Odds come from **The Odds API**, a licensed aggregator. Bookmaker coverage "
-        "depends on region: FanDuel / DraftKings / BetMGM (US), William Hill / Unibet / "
-        "Ladbrokes / Pinnacle (UK/EU). **bet365, SportyBet, and Betway are not available "
-        "through any legitimate API** — this dashboard does not scrape sportsbooks. "
-        "Compare the recommended selection/line against your actual book before staking.\n"
-        "- \"Fair probability\" is the **de-vigged market-implied probability** (bookmaker "
-        "margin mathematically removed) — not a proprietary prediction model. It reflects "
-        "what the market collectively prices, generally the sharpest available estimate.\n"
-        "- The O/U pick is always the **balance-point line** (closest to a fair 50/50), "
-        "never the cheap near-certain end or the juicy-looking extreme end of the board.\n"
-        "- Confidence stars reflect **how many independent books quote and agree on the "
-        "line**, not certainty of the outcome. Nothing here is guaranteed. Bet responsibly."
-    )
 
 try:
     odds_api.check_api_key()
@@ -46,12 +40,14 @@ except odds_api.OddsAPIError as e:
     st.error(str(e))
     st.stop()
 
+
+# --- Caching. Odds are quota-metered, so cache generously. -------------------
 @st.cache_data(ttl=1800, show_spinner="Checking in-season leagues...")
 def cached_sports_by_group():
     return odds_api.in_season_sports_by_group()
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def cached_odds(sport_key: str, regions_arg: str):
     return odds_api.get_odds(sport_key, regions=regions_arg)
 
@@ -66,227 +62,502 @@ def cached_form(team_name: str):
     return form.get_form(team_name)
 
 
+@st.cache_resource(show_spinner="Fetching historical results...")
+def cached_history(division: str, years: tuple):
+    from src.datafeeds.football_data import fetch_seasons
+
+    return fetch_seasons(division, list(years))
+
+
+@st.cache_resource(show_spinner="Fitting Dixon-Coles...")
+def cached_model(division: str, years: tuple, xi: float):
+    from src.datafeeds.football_data import to_matches
+    from src.models.dixon_coles import DixonColesModel
+
+    rows = cached_history(division, years)
+    if len(rows) < 100:
+        return None, rows
+    return DixonColesModel(max_goals=10).fit(to_matches(rows), xi=xi), rows
+
+
 try:
     sports_by_group = cached_sports_by_group()
 except odds_api.OddsAPIError as e:
     st.error(str(e))
     st.stop()
 
-# --- Sidebar ---
-st.sidebar.header("Filters")
+# --- Sidebar -----------------------------------------------------------------
+st.sidebar.header("Data")
 st.sidebar.caption(
-    "⚠️ Each league you pick below spends API quota on every uncached refresh "
-    "(free tier: 500 credits/month). Start small."
+    "Each league costs API quota on every uncached refresh (free tier: 500/month). "
+    "More regions = more books = better fair-value estimates, but more quota."
 )
-groups = st.sidebar.multiselect(
-    "Sports", options=list(odds_api.SPORT_GROUPS), default=["Soccer"]
-)
+groups = st.sidebar.multiselect("Sports", list(odds_api.SPORT_GROUPS), default=["Soccer"])
 regions = st.sidebar.multiselect(
-    "Bookmaker regions",
-    options=["eu", "uk", "us", "au"],
-    default=["eu"],
-    help="More regions = more books compared, but costs more API quota per refresh.",
+    "Bookmaker regions", ["eu", "uk", "us", "au"], default=["eu", "uk"],
+    help="Sharp books (Pinnacle) live in 'eu'. Keep it selected — the fair line depends on it.",
 )
-show_live = st.sidebar.checkbox("Show live matches", value=True)
-show_upcoming = st.sidebar.checkbox("Show upcoming fixtures", value=True)
-fetch_form = st.sidebar.checkbox("Include recent-form lookup (slower, best-effort)", value=False)
-if st.sidebar.button("🔄 Force refresh (clears cache)"):
-    st.cache_data.clear()
-
 regions_str = ",".join(regions) if regions else "eu"
 
-selected_leagues_by_group = {}
+selected_leagues = {}
 for group in groups:
     available = sports_by_group.get(group, [])
-    titles = [l["title"] for l in available]
-    default_titles = titles[:5]
-    chosen = st.sidebar.multiselect(f"{group} leagues", options=titles, default=default_titles)
-    selected_leagues_by_group[group] = chosen
+    titles = [x["title"] for x in available]
+    selected_leagues[group] = st.sidebar.multiselect(
+        f"{group} leagues", titles, default=titles[:3]
+    )
 
-now = datetime.now(timezone.utc)
+st.sidebar.header("Model & staking")
+devig_method = st.sidebar.selectbox(
+    "De-vig method", METHODS, index=0,
+    help="Shin models informed money and is the best-supported choice. "
+         "Multiplicative is the naive baseline; compare them to see the bias.",
+)
+min_ev = st.sidebar.slider(
+    "Minimum EV to show (%)", 0.0, 15.0, 2.0, 0.5,
+    help="Below ~1-2% the edge is inside the noise of the fair-value estimate.",
+) / 100.0
+kelly_mult = st.sidebar.slider(
+    "Kelly fraction", 0.05, 1.0, DEFAULT_KELLY_FRACTION, 0.05,
+    help="Fraction of full Kelly. Above 1.0 is mathematically ruinous; 0.25 is "
+         "the sane default when probabilities are estimated rather than known.",
+)
+shrink_k = st.sidebar.slider(
+    "Uncertainty shrinkage (σ)", 0.0, 3.0, DEFAULT_SHRINK_K, 0.25,
+    help="Standard errors of book disagreement subtracted from the fair "
+         "probability before sizing. Higher = more conservative.",
+)
+exposure_cap = st.sidebar.slider(
+    "Max slate exposure (%)", 1.0, 50.0, DEFAULT_EXPOSURE_CAP * 100, 1.0,
+    help="Total bankroll at risk across all simultaneous bets.",
+) / 100.0
+bankroll = st.sidebar.number_input("Bankroll", min_value=1.0, value=1000.0, step=50.0)
+
+if st.sidebar.button("🔄 Force refresh (clears cache)"):
+    st.cache_data.clear()
 
 
 def parse_iso(ts: str):
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return None
 
 
-for group in groups:
-    chosen_titles = set(selected_leagues_by_group.get(group, []))
-    leagues = [l for l in sports_by_group.get(group, []) if l["title"] in chosen_titles]
-    st.header(group)
-    if not sports_by_group.get(group):
-        st.info(f"No {group.lower()} leagues currently in-season/tracked by this API.")
-        continue
-    if not leagues:
-        st.caption(f"No {group.lower()} leagues selected — pick some in the sidebar.")
-        continue
+def fmt_when(ts: str) -> str:
+    dt = parse_iso(ts)
+    return dt.astimezone().strftime("%a %d %b %H:%M") if dt else str(ts)
 
-    all_events = []
-    live_rows = []
-    quota_left = None
 
-    for league in leagues:
-        sport_key = league["key"]
-        try:
-            events, quota_left = cached_odds(sport_key, regions_str)
-        except odds_api.OddsAPIError as e:
-            st.warning(f"{league['title']}: {e}")
-            continue
-        for ev in events:
-            ev["_league"] = league["title"]
-            all_events.append(ev)
-
-        if show_live:
+@st.cache_data(ttl=600, show_spinner="Loading odds...")
+def load_events(groups_key: tuple, leagues_key: tuple, regions_arg: str):
+    """All events across the selected leagues, tagged with league + sport."""
+    events, quota = [], None
+    for group, titles in leagues_key:
+        for league in sports_by_group.get(group, []):
+            if league["title"] not in titles:
+                continue
             try:
-                scores, sc_quota = cached_scores(sport_key)
-                quota_left = sc_quota or quota_left
-            except odds_api.OddsAPIError:
-                scores = []
-            for s in scores:
-                if s.get("completed"):
-                    continue
-                ct = parse_iso(s.get("commence_time", ""))
-                if ct is None or ct > now:
-                    continue  # not started yet -> not live
-                score_list = s.get("scores") or []
-                score_txt = (
-                    " - ".join(f"{sc['name']} {sc['score']}" for sc in score_list)
-                    if score_list
-                    else "Score not yet reported"
-                )
-                live_rows.append(
-                    {
-                        "League": league["title"],
-                        "Home": s.get("home_team"),
-                        "Away": s.get("away_team"),
-                        "Score": score_txt,
-                        "Last update": s.get("last_update", ""),
-                    }
-                )
+                found, quota = cached_odds(league["key"], regions_arg)
+            except odds_api.OddsAPIError as exc:
+                st.warning(f"{league['title']}: {exc}")
+                continue
+            for ev in found:
+                ev["_league"] = league["title"]
+                ev["_group"] = group
+                ev["_sport_key"] = league["key"]
+                events.append(ev)
+    events.sort(key=lambda e: e.get("commence_time") or "")
+    return events, quota
 
-    st.markdown(
-        render.stat_tiles(
-            [("Live now", len(live_rows) if show_live else "—"),
-             ("Upcoming tracked", len([e for e in all_events if e.get("commence_time")])),
-             ("Leagues tracked", len(leagues))]
-        ),
-        unsafe_allow_html=True,
+
+leagues_key = tuple((g, tuple(selected_leagues.get(g, []))) for g in groups)
+events, quota_left = ([], None)
+if groups and any(t for _, t in leagues_key):
+    events, quota_left = load_events(tuple(groups), leagues_key, regions_str)
+
+tab_ev, tab_fix, tab_arb, tab_model, tab_ledger, tab_docs = st.tabs(
+    ["🎯 +EV Board", "🗓️ Fixtures", "⚖️ Arb & Middles", "🧪 Model Lab", "📒 Ledger & CLV", "📘 Methodology"]
+)
+
+# =============================================================== +EV BOARD ===
+with tab_ev:
+    st.subheader("Selections priced above fair value")
+    st.caption(
+        "Fair value for each book's price is built from the *other* books — sharp-anchored "
+        "where a sharp book is present. An empty board is the normal, correct result: it "
+        "means nothing is currently mispriced."
     )
+    if not events:
+        st.info("Select at least one league in the sidebar to scan.")
+    else:
+        opportunities = picks.scan_slate(
+            events, min_ev=min_ev, devig_method=devig_method,
+            kelly_multiplier=kelly_mult, shrink_k=shrink_k, exposure_cap=exposure_cap,
+        )
+        staked = [o for o in opportunities if (o.stake_fraction or 0) > 0]
 
-    if show_live:
-        st.subheader("🔴 Live")
-        if live_rows:
-            for lr in live_rows:
-                st.markdown(
-                    render.fixture_card(
-                        when="In progress",
-                        league=lr["League"],
-                        sport=group,
-                        home=lr["Home"],
-                        away=lr["Away"],
-                        h2h=None,
-                        total_pick=None,
-                        is_live=True,
-                        live_score=lr["Score"],
-                    ),
-                    unsafe_allow_html=True,
-                )
-            with st.expander("Table view"):
-                st.dataframe(pd.DataFrame(live_rows), width="stretch", hide_index=True)
-        else:
-            st.caption("No live games right now.")
+        st.markdown(
+            render.stat_tiles([
+                ("Events scanned", len(events)),
+                ("+EV selections", len(opportunities)),
+                ("Passing shrinkage", len(staked)),
+                ("Total exposure", f"{sum(o.stake_fraction or 0 for o in staked) * 100:.1f}%"),
+            ]),
+            unsafe_allow_html=True,
+        )
 
-    if show_upcoming:
-        st.subheader("🗓️ Upcoming")
-        upcoming = [e for e in all_events if e.get("commence_time")]
-        upcoming.sort(key=lambda e: e["commence_time"])
-
-        if not upcoming:
-            st.caption("No upcoming fixtures with quoted odds right now.")
+        if not opportunities:
+            st.success(
+                f"No selection currently exceeds {min_ev * 100:.1f}% EV. "
+                "That is the market working as expected — do not force a bet."
+            )
         else:
             rows = []
-            for ev in upcoming:
-                h2h = picks.summarize_h2h(ev)
-                total_pick = picks.pick_total_line(ev)
-                verdict = picks.build_verdict(ev, h2h, total_pick)
-
-                home, away = ev.get("home_team"), ev.get("away_team")
-                ct = parse_iso(ev.get("commence_time", ""))
-                when = ct.astimezone().strftime("%a %d %b, %H:%M") if ct else ev.get("commence_time", "?")
-
-                fav_name, fav_pct, fav_odds, fav_book, fav_stars = "N/A", "N/A", "N/A", "N/A", 0
-                if h2h and h2h["outcomes"]:
-                    fav_name, fav_data = max(
-                        h2h["outcomes"].items(), key=lambda kv: (kv[1]["fair_prob"] or 0)
-                    )
-                    fav_pct = f"{round((fav_data['fair_prob'] or 0) * 100)}%"
-                    fav_odds = fav_data["best_odds"]
-                    fav_book = fav_data["best_book"]
-                    fav_stars = h2h["stars"]
-
-                ou_txt, ou_odds, ou_book, ou_stars = "N/A", "N/A", "N/A", 0
-                if total_pick:
-                    side = total_pick["side"]
-                    pct = round(
-                        (total_pick["fair_over"] if side == "Over" else total_pick["fair_under"]) * 100
-                    )
-                    ou_txt = f"{side} {total_pick['point']} (~{pct}%)"
-                    ou_odds = total_pick["best_over_odds"] if side == "Over" else total_pick["best_under_odds"]
-                    ou_book = total_pick["best_over_book"] if side == "Over" else total_pick["best_under_book"]
-                    ou_stars = total_pick["stars"]
-
-                row = {
-                    "Date": when,
-                    "League": ev.get("_league"),
-                    "Home": home,
-                    "Away": away,
-                    "Favorite": fav_name,
-                    "Win %": fav_pct,
-                    "Moneyline pick": f"{fav_odds} @ {fav_book}" if fav_odds != "N/A" else "N/A",
-                    "1X2 confidence": fmt_stars(fav_stars) if fav_stars else "N/A",
-                    "O/U pick": ou_txt,
-                    "O/U odds": f"{ou_odds} @ {ou_book}" if ou_odds != "N/A" else "N/A",
-                    "O/U confidence": fmt_stars(ou_stars) if ou_stars else "N/A",
-                }
-                if fetch_form:
-                    hf = cached_form(home)
-                    af = cached_form(away)
-                    row["Home form"] = f"{hf['results']} ({hf['score']}%)" if hf else "N/A"
-                    row["Away form"] = f"{af['results']} ({af['score']}%)" if af else "N/A"
+            for o in opportunities:
+                row = o.as_row()
+                row["Starts"] = fmt_when(row["Starts"])
+                row["Stake"] = round(bankroll * (o.stake_fraction or 0), 2)
                 rows.append(row)
+            df = pd.DataFrame(rows)
+            st.dataframe(
+                df, width="stretch", hide_index=True,
+                column_config={
+                    "EV %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Stake %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Stake": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
+            st.caption(
+                "**Edge pp** is the probability-space edge; **EV %** is the return per unit "
+                "staked. A bet should look good on both — EV alone flatters longshots. "
+                "**Disagreement pp** is how much the books differ; when it exceeds the edge, "
+                "the edge is inside the noise."
+            )
 
-                st.markdown(
-                    render.fixture_card(
-                        when=when,
-                        league=ev.get("_league"),
-                        sport=group,
-                        home=home,
-                        away=away,
-                        h2h=h2h,
-                        total_pick=total_pick,
-                    ),
-                    unsafe_allow_html=True,
-                )
-                with st.expander(f"Full breakdown — {home} vs {away}"):
-                    st.write(verdict)
-                    if fetch_form:
-                        st.caption(f"Recent form — {row.get('Home form', 'N/A')} vs {row.get('Away form', 'N/A')}")
-                    if h2h:
-                        st.markdown("**Moneyline / 1X2 — all outcomes:**")
-                        st.table(pd.DataFrame(h2h["outcomes"]).T)
-                    if total_pick:
-                        st.markdown(
-                            f"**Totals — lines considered:** {total_pick['all_lines_considered']} "
-                            f"→ chosen balance-point line: **{total_pick['point']} {total_pick['side']}**"
+            with st.expander("Log a bet to the ledger"):
+                if staked:
+                    labels = {
+                        f"{o.home} v {o.away} · {o.selection} "
+                        f"{'' if o.point is None else o.point} @ {o.odds} ({o.book_title}) "
+                        f"· {o.ev * 100:+.1f}% EV": i
+                        for i, o in enumerate(staked)
+                    }
+                    choice = st.selectbox("Selection", list(labels))
+                    pick = staked[labels[choice]]
+                    stake_amt = st.number_input(
+                        "Stake", min_value=0.0,
+                        value=float(round(bankroll * (pick.stake_fraction or 0), 2)),
+                    )
+                    taken = st.number_input("Price actually taken", min_value=1.01, value=float(pick.odds))
+                    if st.button("Log bet"):
+                        conn = ledger.connect()
+                        ledger.log_bet(
+                            conn, event_id=pick.event_id, commence_time=pick.commence_time,
+                            league=pick.league, home=pick.home, away=pick.away,
+                            market=pick.market, point=pick.point, selection=pick.selection,
+                            book=pick.book_title, odds_taken=taken, stake=stake_amt,
+                            fair_prob=pick.fair_prob, ev_at_bet=pick.ev,
+                            notes=f"anchor={pick.anchor_quality} books={pick.n_books}",
                         )
+                        conn.close()
+                        st.success("Logged. Record the closing price at kickoff to grade CLV.")
+                else:
+                    st.caption("Nothing passes the shrinkage filter right now.")
 
-            with st.expander("Table view (all fixtures)"):
-                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+# ================================================================= FIXTURES ===
+with tab_fix:
+    if not events:
+        st.info("Select at least one league in the sidebar.")
+    for group in groups:
+        group_events = [e for e in events if e.get("_group") == group]
+        if not group_events:
+            continue
+        st.header(group)
+        for ev in group_events:
+            h2h = picks.summarize_h2h(ev, devig_method)
+            total = picks.best_total_bet(ev, devig_method)
+            st.markdown(
+                render.fixture_card(
+                    when=fmt_when(ev.get("commence_time")), league=ev.get("_league"),
+                    sport=group, home=ev.get("home_team"), away=ev.get("away_team"),
+                    h2h=h2h, total_pick=total,
+                ),
+                unsafe_allow_html=True,
+            )
+            with st.expander(f"Breakdown — {ev.get('home_team')} vs {ev.get('away_team')}"):
+                st.write(picks.build_verdict(ev, h2h, total))
+                gap = picks.sharp_disagreement(ev)
+                if gap:
+                    st.markdown(
+                        f"**Sharp vs soft:** sharp books price **{gap['selection']}** at "
+                        f"{gap['sharp_prob'] * 100:.1f}% against the recreational consensus's "
+                        f"{gap['soft_prob'] * 100:.1f}% — a **{gap['gap_pp']:+.1f}pp** gap "
+                        f"(sharp: {', '.join(gap['sharp_books'])})."
+                    )
+                if h2h:
+                    st.dataframe(pd.DataFrame(h2h["outcomes"]).T, width="stretch")
+                own = picks.scan_event(ev, min_ev=min_ev, devig_method=devig_method,
+                                       kelly_multiplier=kelly_mult, shrink_k=shrink_k)
+                if own:
+                    st.markdown("**+EV selections on this match:**")
+                    st.dataframe(pd.DataFrame([o.as_row() for o in own]),
+                                 width="stretch", hide_index=True)
 
-    if quota_left is not None:
-        st.caption(f"Odds API quota remaining this month: {quota_left}")
+# =========================================================== ARB & MIDDLES ===
+with tab_arb:
+    st.subheader("Arbitrage and middles")
+    st.caption(
+        "Read these sceptically. A genuine arbitrage on a liquid market is rare and small; "
+        "a large one almost always means a stale quote or a mismatched line, so this scan "
+        "doubles as an integrity check on the odds feed."
+    )
+    arbs, middles = [], []
+    for ev in events:
+        found = arbitrage.find_arbitrage(ev, "h2h")
+        if found:
+            found.update({"match": f"{ev.get('home_team')} vs {ev.get('away_team')}",
+                          "league": ev.get("_league"), "starts": fmt_when(ev.get("commence_time"))})
+            arbs.append(found)
+        for m in arbitrage.find_middles(ev)[:2]:
+            if m["gap"] >= 0.5 and m["cost_pct"] < 8:
+                m.update({"match": f"{ev.get('home_team')} vs {ev.get('away_team')}",
+                          "league": ev.get("_league")})
+                middles.append(m)
 
-    st.divider()
+    st.markdown("#### Arbitrage")
+    if arbs:
+        for a in arbs:
+            tone = "⚠️ suspicious — verify before staking" if a["suspect"] else "✅ plausible"
+            st.markdown(f"**{a['match']}** ({a['league']}, {a['starts']}) — "
+                        f"{a['profit_pct']:+.2f}% · booksum {a['booksum']} · {tone}")
+            st.dataframe(pd.DataFrame(a["legs"]), width="stretch", hide_index=True)
+    else:
+        st.caption("No arbitrage across the selected books — the expected result.")
+
+    st.markdown("#### Middles")
+    if middles:
+        middles.sort(key=lambda m: (-m["gap"], m["cost_pct"]))
+        st.dataframe(pd.DataFrame(middles), width="stretch", hide_index=True)
+        st.caption("`cost_pct` is what the position costs when the result lands outside the "
+                   "window. Negative means it is also an outright arbitrage.")
+    else:
+        st.caption("No middles worth the spread right now.")
+
+# ================================================================ MODEL LAB ===
+with tab_model:
+    st.subheader("Dixon-Coles goal model")
+    st.caption(
+        "Fitted on free historical results from football-data.co.uk. The score matrix prices "
+        "1X2, totals, both-teams-to-score and Asian handicaps from one coherent distribution, "
+        "so those prices cannot contradict each other the way a book's can."
+    )
+    from src.datafeeds.football_data import DIVISIONS
+
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        division = st.selectbox("League", list(DIVISIONS), format_func=lambda d: DIVISIONS[d])
+    with col_b:
+        n_seasons = st.slider("Seasons of history", 1, 8, 4)
+    with col_c:
+        xi = st.select_slider(
+            "Time decay ξ", options=[0.0, 0.0005, 0.001, 0.0019, 0.003, 0.005], value=0.0019,
+            help="Per-day exponential decay. ξ=0.0019 is roughly a one-year half-life.",
+        )
+    years = tuple(range(2026 - n_seasons, 2026))
+
+    if st.button("Fit model"):
+        st.session_state["fit_request"] = (division, years, xi)
+
+    if st.session_state.get("fit_request"):
+        div_sel, yrs, xi_sel = st.session_state["fit_request"]
+        model, rows = cached_model(div_sel, yrs, xi_sel)
+        if model is None:
+            st.error(f"Not enough history for {DIVISIONS[div_sel]} in those seasons.")
+        else:
+            half_life = (0.693 / xi_sel) if xi_sel else None
+            st.markdown(render.stat_tiles([
+                ("Matches fitted", model.n_matches),
+                ("Teams", len(model.teams)),
+                ("Home advantage", f"{model.home_advantage:+.3f} log-goals"),
+                ("Low-score ρ", f"{model.rho:+.3f}"),
+                ("Decay half-life", f"{half_life:.0f}d" if half_life else "none"),
+            ]), unsafe_allow_html=True)
+            st.caption(
+                f"Home advantage of {model.home_advantage:+.3f} in log-goals means the same "
+                f"team scores about {(2.718 ** model.home_advantage - 1) * 100:.0f}% more goals "
+                f"at home. ρ={model.rho:+.3f} is the Dixon-Coles correction to low-scoring "
+                "draws; a negative ρ means independent Poisson was over-predicting them."
+            )
+
+            left, right = st.columns([1, 1])
+            with left:
+                st.markdown("**Team ratings** (net = attack − defence)")
+                st.dataframe(pd.DataFrame(model.team_ratings()), width="stretch",
+                             hide_index=True, height=420)
+                st.caption("Sanity check: this should look roughly like the league table. "
+                           "If it does not, the fit is wrong and nothing below is usable.")
+            with right:
+                st.markdown("**Price a matchup**")
+                home = st.selectbox("Home", model.teams, key="mh")
+                away = st.selectbox("Away", model.teams,
+                                    index=min(1, len(model.teams) - 1), key="ma")
+                if home != away:
+                    lam, mu = model.expected_goals(home, away)
+                    mo = model.match_odds(home, away)
+                    st.markdown(f"Expected goals: **{home} {lam:.2f} – {mu:.2f} {away}**")
+                    st.dataframe(pd.DataFrame([{
+                        "Market": "1X2",
+                        f"{home}": f"{mo['home'] * 100:.1f}% ({1 / mo['home']:.2f})",
+                        "Draw": f"{mo['draw'] * 100:.1f}% ({1 / mo['draw']:.2f})",
+                        f"{away}": f"{mo['away'] * 100:.1f}% ({1 / mo['away']:.2f})",
+                    }]), width="stretch", hide_index=True)
+
+                    line = st.select_slider("Totals line",
+                                            options=[0.5, 1.5, 2.5, 3.5, 4.5], value=2.5)
+                    tot, bt = model.totals(home, away, line), model.btts(home, away)
+                    st.dataframe(pd.DataFrame([
+                        {"Market": f"Over/Under {line}",
+                         "Yes/Over": f"{tot['Over'] * 100:.1f}% ({1 / tot['Over']:.2f})",
+                         "No/Under": f"{tot['Under'] * 100:.1f}% ({1 / tot['Under']:.2f})"},
+                        {"Market": "Both teams to score",
+                         "Yes/Over": f"{bt['Yes'] * 100:.1f}% ({1 / bt['Yes']:.2f})",
+                         "No/Under": f"{bt['No'] * 100:.1f}% ({1 / bt['No']:.2f})"},
+                    ]), width="stretch", hide_index=True)
+                    st.markdown("**Most likely scorelines**")
+                    st.dataframe(
+                        pd.DataFrame(model.correct_score(home, away, 8),
+                                     columns=["Score", "Probability"]),
+                        width="stretch", hide_index=True,
+                    )
+
+            st.divider()
+            st.markdown("#### Walk-forward backtest against closing prices")
+            st.caption(
+                "Refits before every prediction on prior matches only, then scores against "
+                "the de-vigged Pinnacle **closing** line. This is the honest test, and it is "
+                "designed to be failable."
+            )
+            if st.button("Run backtest (slow — refits hundreds of times)"):
+                from src.backtest import simulate_bankroll, walk_forward
+
+                with st.spinner("Walking forward..."):
+                    res = walk_forward(rows, min_train=380, step=10, xi=xi_sel,
+                                       devig_method=devig_method)
+                if not res.get("n"):
+                    st.error(res.get("error", "no evaluable matches"))
+                else:
+                    st.dataframe(pd.DataFrame([
+                        {"Forecaster": "Dixon-Coles alone", "Log loss": res["model"]["log_loss"],
+                         "Brier": res["model"]["brier"]},
+                        {"Forecaster": "Market (Pinnacle close, de-vigged)",
+                         "Log loss": res["market"]["log_loss"], "Brier": res["market"]["brier"]},
+                        {"Forecaster": f"Blend (w={res['blend']['weight']})",
+                         "Log loss": res["blend"]["log_loss"], "Brier": res["blend"]["brier"]},
+                    ]), width="stretch", hide_index=True)
+                    w = res["blend"]["weight"]
+                    if w == 0:
+                        st.warning(
+                            f"Optimal blend weight is **0** over {res['n']} matches: the model "
+                            "adds nothing the closing line has not already priced. That is the "
+                            "expected result for a liquid 1X2 market, and it is the model "
+                            "telling you not to bet it — which is worth more than a fitted "
+                            "number that quietly loses money."
+                        )
+                    else:
+                        st.success(
+                            f"Optimal blend weight **{w}** improves log loss by "
+                            f"{res['blend']['improvement_vs_market']:.5f} over the market alone."
+                        )
+                    sims = [simulate_bankroll(res, source=s, price_key=p)
+                            for s in ("market", "blend") for p in ("psc", "maxc")]
+                    sims = [s for s in sims if s.get("n_bets")]
+                    if sims:
+                        st.markdown("**Bankroll simulation** (quarter-Kelly)")
+                        st.dataframe(pd.DataFrame([{
+                            "Signal": s["source"],
+                            "Price": "Pinnacle" if s["price_key"] == "psc" else "best available",
+                            "Bets": s["n_bets"], "ROI %": round(s["roi"] * 100, 2),
+                            "t-stat": round(s["roi_tstat"], 2),
+                            "Hit %": round(s["hit_rate"] * 100, 1),
+                            "Max DD %": round(s["max_drawdown"] * 100, 1),
+                            "Bets to significance": s.get("bets_for_significance"),
+                        } for s in sims]), width="stretch", hide_index=True)
+                        st.caption("A t-stat below 2 means the ROI is not distinguishable from "
+                                   "luck, however good it looks.")
+
+# ============================================================= LEDGER & CLV ===
+with tab_ledger:
+    st.subheader("Bet ledger and closing line value")
+    st.caption(
+        "Settled profit is a terrible feedback signal over any period you will live through — "
+        "at a realistic 2-3% edge it takes thousands of bets to separate skill from luck. "
+        "CLV is observable within hours of each bet and is what sportsbooks themselves use to "
+        "spot winning accounts. Track it, and let profit catch up."
+    )
+    conn = ledger.connect()
+    perf = ledger.performance(conn)
+
+    if not perf.get("n"):
+        st.info("No bets logged yet. Log one from the +EV Board.")
+    else:
+        tiles = [("Bets", perf["n"]), ("Open", perf["n_open"]), ("Settled", perf["n_settled"])]
+        if "avg_clv" in perf:
+            tiles += [("Avg CLV", f"{perf['avg_clv'] * 100:+.2f}%"),
+                      ("CLV hit rate", f"{perf['clv_hit_rate'] * 100:.0f}%")]
+        if "roi" in perf:
+            tiles += [("ROI", f"{perf['roi'] * 100:+.2f}%"), ("P&L", f"{perf['pnl']:+.2f}")]
+        st.markdown(render.stat_tiles(tiles), unsafe_allow_html=True)
+
+        if "clv_verdict" in perf:
+            verdict = perf["clv_verdict"]
+            (st.success if "strong" in verdict or "positive edge" in verdict
+             else st.error if "no edge" in verdict else st.info)(f"**CLV verdict:** {verdict}")
+        if perf.get("bets_for_significance"):
+            st.caption(
+                f"At the ROI observed so far it would take roughly "
+                f"**{perf['bets_for_significance']:,} settled bets** for profit alone to "
+                "prove an edge at two standard errors. This is exactly why CLV is the "
+                "metric to watch."
+            )
+
+        st.markdown("#### Open bets — record the closing price at kickoff")
+        for bet in ledger.open_bets(conn):
+            c1, c2, c3 = st.columns([3, 1, 1])
+            c1.markdown(
+                f"**{bet['home']} v {bet['away']}** · {bet['selection']} "
+                f"{'' if bet['point'] is None else bet['point']} @ {bet['odds_taken']} "
+                f"({bet['book']}) · stake {bet['stake']}"
+            )
+            close = c2.number_input("Close", min_value=0.0, value=float(bet["closing_odds"] or 0.0),
+                                    key=f"cl{bet['id']}", label_visibility="collapsed")
+            result = c3.selectbox("Result", ["—", "win", "loss", "push", "void"],
+                                  key=f"rs{bet['id']}", label_visibility="collapsed")
+            if c3.button("Save", key=f"sv{bet['id']}"):
+                if close > 1:
+                    ledger.record_close(conn, bet["id"], close)
+                if result != "—":
+                    ledger.settle(conn, bet["id"], result)
+                st.rerun()
+
+        st.markdown("#### All bets")
+        st.dataframe(pd.DataFrame(ledger.all_bets(conn)), width="stretch", hide_index=True)
+        st.download_button("⬇️ Export ledger CSV", ledger.to_csv(conn), "bets.csv", "text/csv")
+        st.caption(
+            "On Streamlit Community Cloud the filesystem resets on redeploy — export "
+            "anything you want to keep."
+        )
+
+    uploaded = st.file_uploader("Restore a ledger from CSV", type="csv")
+    if uploaded is not None and st.button("Import"):
+        count = ledger.from_csv(conn, uploaded.getvalue().decode("utf-8"))
+        st.success(f"Imported {count} bets.")
+        st.rerun()
+    conn.close()
+
+# ============================================================== METHODOLOGY ===
+with tab_docs:
+    st.markdown(render.METHODOLOGY_MD)
+
+if quota_left is not None:
+    st.caption(f"Odds API quota remaining this month: {quota_left}")

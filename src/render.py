@@ -122,9 +122,9 @@ def inject_css() -> str:
 def stat_tiles(items: list) -> str:
     """items: list of (label, value) tuples."""
     tiles = "".join(
-        f'<div class="stat-tile"><div class="stat-tile-label">{_esc(l)}</div>'
-        f'<div class="stat-tile-value">{_esc(v)}</div></div>'
-        for l, v in items
+        f'<div class="stat-tile"><div class="stat-tile-label">{_esc(label)}</div>'
+        f'<div class="stat-tile-value">{_esc(value)}</div></div>'
+        for label, value in items
     )
     return f'<div class="stat-tile-row">{tiles}</div>'
 
@@ -165,6 +165,23 @@ def prob_bar(home: str, away: str, h2h_outcomes: dict) -> str:
     return bar + legend
 
 
+def ev_badge(ev_pct: float) -> str:
+    """Colour-coded expected value. Negative EV is shown, not hidden -- most
+    prices on any board are negative EV, and seeing that is the point."""
+    if ev_pct is None:
+        return ""
+    if ev_pct >= 3:
+        colour, label = "#16a34a", f"+{ev_pct:.1f}% EV"
+    elif ev_pct > 0:
+        colour, label = "#65a30d", f"+{ev_pct:.1f}% EV"
+    elif ev_pct > -3:
+        colour, label = "#a1a1aa", f"{ev_pct:.1f}% EV"
+    else:
+        colour, label = "#dc2626", f"{ev_pct:.1f}% EV"
+    return (f'<span class="badge" style="background:{colour}22;color:{colour};'
+            f'border:1px solid {colour}55;">{label}</span>')
+
+
 def fixture_card(
     when: str,
     league: str,
@@ -190,19 +207,25 @@ def fixture_card(
 
     picks_html = ""
     if h2h and h2h.get("outcomes"):
-        fav_name, fav_data = max(h2h["outcomes"].items(), key=lambda kv: (kv[1]["fair_prob"] or 0))
+        # Rank by the value on offer, not by who is most likely to win. The
+        # favourite is usually the worst-priced selection on the board.
+        best_name, best_data = max(
+            h2h["outcomes"].items(), key=lambda kv: kv[1].get("best_ev_pct", -99)
+        )
         picks_html += (
-            f'<div class="pick-line">Moneyline: <b>{_esc(fav_name)}</b> — best price '
-            f'<b>{fav_data["best_odds"]}</b> @ {_esc(fav_data["best_book"])} '
+            f'<div class="pick-line">Moneyline: <b>{_esc(best_name)}</b> — fair '
+            f'<b>{best_data["fair_odds"]}</b>, best <b>{best_data["best_odds"]}</b> '
+            f'@ {_esc(best_data["best_book"])} {ev_badge(best_data.get("best_ev_pct", 0))} '
             f'{confidence_badge(h2h["stars"])}</div>'
         )
     if total_pick:
         side = total_pick["side"]
-        odds = total_pick["best_over_odds"] if side == "Over" else total_pick["best_under_odds"]
-        book = total_pick["best_over_book"] if side == "Over" else total_pick["best_under_book"]
+        odds = total_pick.get(f"best_{side.lower()}_odds")
+        book = total_pick.get(f"best_{side.lower()}_book")
         picks_html += (
-            f'<div class="pick-line">Totals: <b>{side} {total_pick["point"]}</b> — best price '
-            f'<b>{odds}</b> @ {_esc(book)} {confidence_badge(total_pick["stars"])}</div>'
+            f'<div class="pick-line">Totals: <b>{side} {total_pick["point"]}</b> — best '
+            f'<b>{odds}</b> @ {_esc(book)} {ev_badge(total_pick.get("ev_pct", 0))} '
+            f'{confidence_badge(total_pick["stars"])}</div>'
         )
     if not picks_html:
         picks_html = '<div class="pick-line">No markets quoted by tracked books — skip.</div>'
@@ -221,4 +244,76 @@ def fixture_card(
   {bar_html}
   {picks_html}
 </div>
+"""
+
+
+METHODOLOGY_MD = """
+## What this tool does, and what it cannot do
+
+### The estimate
+Every fair probability here is built in four steps:
+
+1. **De-vig each book separately.** A bookmaker's prices imply probabilities
+   summing to more than 1; the excess is their margin. Removing it with the
+   naive method (divide by the booksum) is *biased* -- it spreads margin in
+   proportion to price, when books actually load margin onto longshots. The
+   default here is **Shin's method**, which models the book as pricing to
+   protect against informed money, and is the best-supported choice in the
+   literature. On a lopsided 1X2 the two methods disagree by well over a
+   percentage point on the favourite -- which is larger than the entire edge a
+   +EV bettor is hunting. Switch methods in the sidebar and watch the numbers
+   move.
+2. **Pool across books in log-odds space, weighted by book quality.** Averaging
+   decimal odds is a real mathematical error: odds are a reciprocal scale, so by
+   Jensen's inequality the average price is systematically longer than the price
+   implied by the average probability. That manufactures edge that is not there.
+3. **Anchor to sharp books.** Pinnacle and the exchanges run thin margins, take
+   large limits, and welcome winning bettors, so their price is a market-clearing
+   price. A recreational book's price is shaded toward public sentiment. They are
+   not interchangeable estimators and are not weighted as if they were.
+4. **Exclude the book being judged.** When testing whether a book's price is
+   +EV, that book's own number is removed from the benchmark. Leaving it in is
+   the same leakage as scoring a model on its training data, and it shrinks
+   edges exactly when they are most real.
+
+### The stake
+Sizing uses fractional Kelly on a **shrunk** probability, where the shrinkage is
+the observed disagreement between books. This matters more than it sounds.
+Kelly assumes you *know* the probability; you only have an estimate. Because
+Kelly's growth curve falls away faster on the downside than it rises on the
+upside, plugging in a point estimate systematically overbets. Past roughly twice
+the Kelly fraction, expected log growth turns **negative even when your edge is
+real** -- overbetting does not merely reduce your return, it reverses it. The
+default quarter-Kelly and the exposure cap exist for that reason.
+
+### The verdict
+Results are a poor feedback signal. At a realistic 2-3% edge it takes thousands
+of settled bets before profit can be distinguished from luck, and the ledger
+tells you the exact number for your own betting. **Closing line value** is the
+way out: if the sharp closing price moves toward a bet after you place it, you
+bought something the market later agreed was underpriced. It is observable
+within hours, far less noisy than P&L, and it is the metric sportsbooks
+themselves use to identify winning accounts.
+
+### What the backtest found
+Walking a Dixon-Coles model forward across several seasons of real matches and
+scoring it against **de-vigged Pinnacle closing prices**, the optimal weight on
+the model in the top divisions comes out at or near **zero**. The market wins.
+That result is reported rather than tuned away, because a model that is quietly
+worse than the closing line will lose money slowly and confidently, and a
+backtest that hides this is worse than no backtest.
+
+The honest reading: for liquid 1X2 markets, the reliable sources of edge are
+**line shopping** (taking the best of many prices for a bet the sharp consensus
+already justifies) and **discipline** (staking correctly, tracking CLV, not
+betting when nothing is mispriced) -- not out-forecasting the close. The model
+earns its place on thinner markets and derivative prices, where it prices
+totals, both-teams-to-score and handicaps from one internally consistent
+distribution.
+
+### What this is not
+Not a guaranteed-profit system; no such thing exists. Odds move, the best price
+may be gone by the time you reach it, winning accounts get limited, and a real
+edge still loses over long stretches. Everything here is decision support with
+its uncertainty made visible. Stake only what you can afford to lose.
 """
