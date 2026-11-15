@@ -29,15 +29,102 @@
       }
     },
     "sources": [
-      ["France vs Turkiye: prediction, line-ups and team news (RotoWire)", "https://www.rotowire.com/soccer/article/france-vs-turkiye-prediction-predicted-lineups-team-news-146321"],
-      ["France vs Turkey: preview and team news (101 Great Goals)", "https://www.101greatgoals.com/match-previews/france-vs-turkey-team-news-line-ups-stats-preview-where-to-watch-nations-league-tv-channel-live-online-stream-prediction/"],
-      ["Croatia vs Czech Republic: preview and team news (Sports Mole)", "https://www.sportsmole.co.uk/football/croatia/preview/croatia-vs-czech-republic-prediction-team-news-lineups_609075.html"],
-      ["Croatia vs Czechia: statistical preview (WhoScored)", "https://www.whoscored.com/matches/1969852/preview/international-uefa-nations-league-a-2026-2027-croatia-czechia"],
-      ["Celtics injury news ahead of the Mavericks game (CelticsBlog)", "https://www.celticsblog.com/boston-celtics-news/148943/celtics-injury-news-mavericks-game"],
-      ["Mavericks vs Celtics prediction (Pick Dawgz)", "https://pickdawgz.com/nba-picks/mavericks-vs-celtics-prediction-11-15-2026-nba-picks-today/"],
-      ["Thunder vs Kings injury report (Yahoo Sports)", "https://sports.yahoo.com/articles/thunder-vs-kings-injury-report-155348350.html"],
-      ["Rockets vs Wizards injury report (ClutchPoints)", "https://clutchpoints.com/nba/nba-stories/rockets-wizards-injury-report-steven-adams-update"],
-      ["Hawks vs Bucks injury report (ClutchPoints)", "https://clutchpoints.com/nba/atlanta-hawks/hawks-vs-bucks-injury-report-kingston-flemings-playing"]
+      [
+        "France vs Turkiye: prediction, line-ups and team news (RotoWire)",
+        "https://www.rotowire.com/soccer/article/france-vs-turkiye-prediction-predicted-lineups-team-news-146321"
+      ],
+      [
+        "France vs Turkey: preview and team news (101 Great Goals)",
+        "https://www.101greatgoals.com/match-previews/france-vs-turkey-team-news-line-ups-stats-preview-where-to-watch-nations-league-tv-channel-live-online-stream-prediction/"
+      ],
+      [
+        "Croatia vs Czech Republic: preview and team news (Sports Mole)",
+        "https://www.sportsmole.co.uk/football/croatia/preview/croatia-vs-czech-republic-prediction-team-news-lineups_609075.html"
+      ],
+      [
+        "Croatia vs Czechia: statistical preview (WhoScored)",
+        "https://www.whoscored.com/matches/1969852/preview/international-uefa-nations-league-a-2026-2027-croatia-czechia"
+      ],
+      [
+        "Celtics injury news ahead of the Mavericks game (CelticsBlog)",
+        "https://www.celticsblog.com/boston-celtics-news/148943/celtics-injury-news-mavericks-game"
+      ],
+      [
+        "Mavericks vs Celtics prediction (Pick Dawgz)",
+        "https://pickdawgz.com/nba-picks/mavericks-vs-celtics-prediction-11-15-2026-nba-picks-today/"
+      ],
+      [
+        "Thunder vs Kings injury report (Yahoo Sports)",
+        "https://sports.yahoo.com/articles/thunder-vs-kings-injury-report-155348350.html"
+      ],
+      [
+        "Rockets vs Wizards injury report (ClutchPoints)",
+        "https://clutchpoints.com/nba/nba-stories/rockets-wizards-injury-report-steven-adams-update"
+      ],
+      [
+        "Hawks vs Bucks injury report (ClutchPoints)",
+        "https://clutchpoints.com/nba/atlanta-hawks/hawks-vs-bucks-injury-report-kingston-flemings-playing"
+      ]
+    ]
+  },
+  "2026-11-16": {
+    "updated": "Sun 15 Nov 2026, evening UTC (the day before)",
+    "verdict": "A weaker day than the 15th: all four legs are Nations League soccer, because NBA prices for Monday night were not yet in the feed when this was built. Rebuild on the day to bring basketball in. **Malta is the leg to drop**: both sides are promoted whatever happens, the first meeting ended 1-1, and tipsters are split. Lithuania at home to Liechtenstein (about 89% to win, around 1.13) is a sturdier fourth leg; the page leaves it out only because the price is so short.",
+    "legs": {
+      "Iceland": {
+        "stars": 4,
+        "note": "Top of the group on 11 points having conceded once in five games, at home to bottom side Luxembourg, who have not scored in four and lost the first meeting 3-0. Reports conflict on Iceland's absences (two possible injuries and a suspension), so check the line-up."
+      },
+      "Greece": {
+        "stars": 3,
+        "note": "At home to a Serbia side already relegated and missing two suspended players (Dragojevic, Zivkovic), with Vlahovic also reported injured. But Greece lost 7-0 to the Netherlands on Friday, and Serbia have nothing left to lose, which makes them unpredictable."
+      },
+      "Malta": {
+        "stars": 2,
+        "note": "Top of their League D group, but both teams are set for promotion regardless, so little rides on it. Gibraltar have scored once all campaign, and that was in the 1-1 draw with Malta. Malta are away and without the suspended Alexander Satariano. Thin data and low stakes: the leg to drop."
+      },
+      "Slovenia": {
+        "stars": 4,
+        "note": "Away to a North Macedonia side with no points, one goal scored and twelve conceded in five games, and already relegated. Slovenia won the first meeting 2-0 and still need a result to hold second place. Previews expect a low-scoring game, so a draw cannot be ruled out."
+      }
+    },
+    "sources": [
+      [
+        "Iceland vs Luxembourg: preview and team news (Sports Mole)",
+        "https://www.sportsmole.co.uk/football/iceland/uefa-nations-league/preview/iceland-vs-luxembourg-prediction-team-news-lineups_609129.html"
+      ],
+      [
+        "Iceland vs Luxembourg: preview (The Stats Zone)",
+        "https://www.thestatszone.com/iceland-vs-luxembourg-preview-prediction-2026-27-uefa-nations-league-league-c-239168"
+      ],
+      [
+        "Greece vs Serbia: preview and team news (Sports Mole)",
+        "https://www.sportsmole.co.uk/football/greece/uefa-nations-league/preview/greece-vs-serbia-prediction-team-news-lineups_609121.html"
+      ],
+      [
+        "Greece vs Serbia: predictions (Bytes Europe)",
+        "https://www.byteseu.com/2522535/"
+      ],
+      [
+        "Gibraltar vs Malta: preview and team news (Sports Mole)",
+        "https://www.sportsmole.co.uk/football/gibraltar/preview/gibraltar-vs-malta-prediction-team-news-lineups_609101.html"
+      ],
+      [
+        "Gibraltar vs Malta: prediction (tips.gg)",
+        "https://tips.gg/article/gibraltar-vs-malta-16-11-2026/"
+      ],
+      [
+        "North Macedonia vs Slovenia: preview and team news (Sports Mole)",
+        "https://www.sportsmole.co.uk/football/macedonia/uefa-nations-league/preview/n-macedonia-vs-slovenia-prediction-team-news-lineups_609097.html"
+      ],
+      [
+        "Lithuania vs Liechtenstein: fixture and form (Foresportia)",
+        "https://www.foresportia.com/en/prediction/uefa-nations-league/lithuania-liechtenstein-2026-11-16/"
+      ],
+      [
+        "NBA schedule, November 2026 (Legion Report)",
+        "https://legionreport.com/nba-schedule-november-2026/"
+      ]
     ]
   }
 }
