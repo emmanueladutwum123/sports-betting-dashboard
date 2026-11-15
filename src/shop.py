@@ -291,7 +291,8 @@ def manual_offers(
     """Turn hand-typed prices from a book outside the feed into evaluated offers.
 
     ``entries`` are ``{"match", "market", "selection", "odds"}`` rows, where
-    ``selection`` is one of :data:`SIDES`. Returns ``(offers, problems)``:
+    ``selection`` is one of :data:`SIDES`. A row may also name its own ``book``
+    (SportyBet, bet365, ...); rows without one belong to ``book_title``. Returns ``(offers, problems)``:
     ``offers`` is a list of ``(Opportunity, check_price result)`` pairs and
     ``problems`` is a list of plain-language reasons a row was skipped. A row
     is never silently dropped and never guessed at.
@@ -334,9 +335,12 @@ def manual_offers(
                 f"Row {n}: too few books quote {market_label} on {label} to build a fair price."
             )
             continue
-        key = (event.get("id"), market_key, point, selection)
+        book = str(entry.get("book") or book_title).strip() or book_title
+        key = (book.lower(), event.get("id"), market_key, point, selection)
         if key in seen:
-            problems.append(f"Row {n}: {selection} ({market_label}) on {label} is entered twice.")
+            problems.append(
+                f"Row {n}: {selection} ({market_label}) on {label} is entered twice for {book}."
+            )
             continue
         seen.add(key)
 
@@ -346,7 +350,7 @@ def manual_offers(
             event_id=event.get("id"), commence_time=event.get("commence_time"),
             league=event.get("_league"), home=event.get("home_team"),
             away=event.get("away_team"), market=market_key, point=point,
-            selection=selection, book_key=MANUAL_BOOK_KEY, book_title=f"{book_title} (yours)",
+            selection=selection, book_key=MANUAL_BOOK_KEY, book_title=f"{book} (yours)",
             odds=odds, quoted_odds=odds, lag_minutes=0.0, fair_prob=res["fair_prob"],
             shrunk_prob=res["shrunk_prob"], sigma=res["sigma"], n_books=res["n_books"],
             anchor_quality=res["anchor_quality"], ev=res["ev"], edge=res["edge"],

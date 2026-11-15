@@ -157,9 +157,10 @@ becomes the best one you can take. The fair line is still built from every
 book: a price you cannot bet is still evidence about what the right price is.
 
 **Books that are not in the feed.** SportyBet and bet365 are in no licensed
-feed. *Check and add your SportyBet prices* takes the odds you are being
-offered, judges them against the same fair value, and lets you save them so
-they compete in the Best Odds table as "SportyBet (yours)" for the session — verdict, the lowest
+feed. *Check and add your SportyBet or bet365 prices* takes the odds you are
+being offered at either book (or any other you name), judges them against the
+same fair value, and lets you save them so they compete in the Best Odds table
+as "SportyBet (yours)" or "bet365 (yours)" for the session — verdict, the lowest
 price at which it becomes a bet, and the stake. A price more than 20% above
 fair gets no verdict and no stake until it has been checked, because that is
 far more often a typo or a mismatched market than a gift.

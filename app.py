@@ -115,6 +115,10 @@ except odds_api.OddsAPIError as e:
     st.error(str(e))
     st.stop()
 
+# Books with no data feed, whose prices are typed in on the Best Odds tab.
+MANUAL_BOOKS = ("SportyBet", "bet365")
+OTHER_BOOK = "Other…"
+
 # --- Sidebar -----------------------------------------------------------------
 st.sidebar.header("Data")
 st.sidebar.caption(
@@ -244,8 +248,8 @@ my_book_keys = st.sidebar.multiselect(
 )
 my_books = set(my_book_keys) or None
 st.sidebar.caption(
-    "Book not listed (SportyBet, bet365…)? Type its prices in under **Add your "
-    "SportyBet prices** on the Best Odds tab."
+    "Book not listed (SportyBet, bet365…)? Type its prices in under **Check and add "
+    "your SportyBet or bet365 prices** on the Best Odds tab."
 )
 
 tab_shop, tab_card, tab_ev, tab_fix, tab_arb, tab_model, tab_ledger, tab_docs = st.tabs(
@@ -276,11 +280,11 @@ with tab_shop:
 
         # ---- Prices typed in from a book outside the feed -------------------
         entries = st.session_state.setdefault("manual_entries", [])
-        with st.expander("➕ Check and add your SportyBet prices (or any book not in the feed)",
+        with st.expander("➕ Check and add your SportyBet or bet365 prices (or any book not in the feed)",
                          expanded=True):
             st.caption(
                 "SportyBet and bet365 have no official data feed, so their odds are entered "
-                "by hand. Pick the match, market and selection, type the decimal odds exactly "
+                "by hand. Pick the bookmaker, the match, market and selection, type the decimal odds exactly "
                 "as your book shows them, and the verdict appears straight away. **Add** keeps "
                 "the price so it competes in the table below alongside every other book. "
                 "Saved prices last for this browser session and do not update themselves — "
@@ -288,12 +292,15 @@ with tab_shop:
             )
             m1, m2 = st.columns([1, 2])
             with m1:
-                manual_book = (st.text_input("Bookmaker name", "SportyBet", key="manual_book")
-                               .strip() or "SportyBet")
+                manual_book = st.radio("Bookmaker", [*MANUAL_BOOKS, OTHER_BOOK],
+                                       horizontal=True, key="manual_book")
+                if manual_book == OTHER_BOOK:
+                    manual_book = (st.text_input("Bookmaker name", key="manual_book_other")
+                                   .strip() or "My book")
             with m2:
                 st.write("")
                 only_manual = st.checkbox(
-                    f"I can only bet at {manual_book} — hide prices I cannot take",
+                    "I can only bet at the books I enter here — hide prices I cannot take",
                     key="manual_only",
                     help="The table below then shows only the selections you added. "
                          "Fair value is still built from every book in the feed.",
@@ -394,21 +401,24 @@ with tab_shop:
                     # Re-entering a selection replaces its old price.
                     entries[:] = [
                         e for e in entries
-                        if (e["match"], e["market"], e["selection"]) != (match_label, mk_label, side)
+                        if (e.get("book", MANUAL_BOOKS[0]), e["match"], e["market"], e["selection"])
+                        != (manual_book, match_label, mk_label, side)
                     ]
-                    entries.append({"match": match_label, "market": mk_label,
-                                    "selection": side, "odds": float(offered)})
+                    entries.append({"book": manual_book, "match": match_label,
+                                    "market": mk_label, "selection": side,
+                                    "odds": float(offered)})
                     st.rerun()
 
         manual, manual_problems = shop.manual_offers(
-            by_label, entries, manual_book, devig_method, kelly_mult, shrink_k, min_ev,
+            by_label, entries, MANUAL_BOOKS[0], devig_method, kelly_mult, shrink_k, min_ev,
         )
         for problem in manual_problems:
             st.warning(problem)
         if entries:
             r1, r2, r3 = st.columns([4, 1, 1])
             labels = [
-                f"{e['match'].split(' · ')[0]} — {e['selection']} ({e['market']}) @ {e['odds']:.2f}"
+                f"{e.get('book', MANUAL_BOOKS[0])}: {e['match'].split(' · ')[0]} — "
+                f"{e['selection']} ({e['market']}) @ {e['odds']:.2f}"
                 for e in entries
             ]
             with r1:
@@ -442,17 +452,18 @@ with tab_shop:
         normalise_slate(picks.one_stake_per_market(list(staked.values())), exposure_cap)
 
         if manual:
-            st.markdown(f"#### Your {manual_book} prices")
+            st.markdown("#### Your prices")
             manual_rows = []
             for opp, res in manual:
                 gap = res["best_feed_odds"] - opp.odds if res["best_feed_odds"] else 0.0
                 manual_rows.append({
                     "Verdict": res["verdict"],
+                    "Book": opp.book_title.removesuffix(" (yours)"),
                     "Match": f"{opp.home} vs {opp.away}",
                     "Market": shop.MATCH_RESULT if opp.market == "h2h"
                     else shop.total_label(opp.point),
                     "Selection": opp.selection,
-                    f"{manual_book} odds": opp.odds,
+                    "Your odds": opp.odds,
                     "Fair odds": round(res["fair_odds"], 2),
                     "Value starts at": round(res["min_odds_for_value"], 2),
                     "EV %": round(opp.ev * 100, 2),
@@ -467,7 +478,7 @@ with tab_shop:
             st.dataframe(
                 pd.DataFrame(manual_rows), width="stretch", hide_index=True,
                 column_config={
-                    f"{manual_book} odds": st.column_config.NumberColumn(format="%.2f"),
+                    "Your odds": st.column_config.NumberColumn(format="%.2f"),
                     "EV %": st.column_config.NumberColumn(format="%+.2f%%"),
                     "Stake": st.column_config.NumberColumn(format="%.2f"),
                     "Stake %": st.column_config.NumberColumn(format="%.2f%%"),
@@ -477,7 +488,7 @@ with tab_shop:
             n_value = sum(1 for o, r in manual if r["verdict"] == shop.VALUE)
             n_verify = sum(1 for o, r in manual if r["verdict"] == shop.VERIFY)
             st.caption(
-                f"**{n_value} of {len(manual)}** {manual_book} prices are value. "
+                f"**{n_value} of {len(manual)}** of your prices are value. "
                 "**Value starts at** is the lowest odds at which the selection becomes a bet. "
                 + (f"**{n_verify}** look too good to be true and get no stake until you have "
                    "re-checked the odds and that the market matches exactly. " if n_verify else "")

@@ -307,6 +307,18 @@ def test_manual_duplicate_selection_is_rejected_once():
     assert len(problems) == 1 and "twice" in problems[0]
 
 
+def test_manual_prices_from_two_books_compete_under_their_own_names():
+    events = _board_with_totals()
+    rows = [{**_row("Home", 2.15), "book": "SportyBet"}, {**_row("Home", 2.20), "book": "bet365"}]
+    offers, problems = shop.manual_offers(events, rows)
+    assert not problems
+    assert [o.book_title for o, _ in offers] == ["SportyBet (yours)", "bet365 (yours)"]
+    line = next(ln for ln in shop.best_lines(events["Arsenal vs Chelsea"],
+                                             extra_offers=[o for o, _ in offers])
+                if ln.best.selection == "Arsenal")
+    assert line.best.book_title == "bet365 (yours)" and line.best.odds == 2.20
+
+
 def test_manual_typo_gets_no_stake_and_cannot_become_best_price():
     events = _board_with_totals()
     offers, _ = shop.manual_offers(events, [_row("Home", 21.0)])  # meant 2.10
