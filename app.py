@@ -15,13 +15,32 @@ Methodology    what the numbers mean and what they cannot do.
 
 Run: ./start.sh   (or `streamlit run app.py` with ODDS_API_KEY set)
 """
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _drop_stale_modules() -> None:
+    """Forget the ``src`` modules whenever one of their files has changed.
+
+    Streamlit re-runs this script after a deploy but keeps already-imported
+    modules in memory, so new code in ``app.py`` would otherwise call functions
+    that the old, still-loaded ``src`` modules do not have.
+    """
+    stamp = max(f.stat().st_mtime for f in (Path(__file__).parent / "src").rglob("*.py"))
+    if getattr(sys, "_src_stamp", None) != stamp:
+        for name in [m for m in sys.modules if m == "src" or m.startswith("src.")]:
+            del sys.modules[name]
+        sys._src_stamp = stamp
+
+
+_drop_stale_modules()
 
 from src import (  # noqa: E402
     arbitrage,
