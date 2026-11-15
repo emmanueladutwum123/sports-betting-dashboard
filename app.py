@@ -15,7 +15,7 @@ Methodology    what the numbers mean and what they cannot do.
 
 Run: ./start.sh   (or `streamlit run app.py` with ODDS_API_KEY set)
 """
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pandas as pd
 import streamlit as st
@@ -86,6 +86,13 @@ def cached_h2h(sport_key: str, regions_arg: str):
     per league, so restricting the card to h2h and a single region is the
     difference between 1 credit a league and 4."""
     return odds_api.get_odds(sport_key, regions=regions_arg, markets="h2h")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_fixtures(sport_key: str):
+    """Fixture list without odds. Free, so it is used to find out which
+    competitions play on a given day before any credit is spent on prices."""
+    return odds_api.get_events(sport_key)
 
 
 @st.cache_resource(show_spinner="Fetching historical results...")
@@ -252,8 +259,9 @@ st.sidebar.caption(
     "your SportyBet or bet365 prices** on the Best Odds tab."
 )
 
-tab_shop, tab_card, tab_ev, tab_fix, tab_arb, tab_model, tab_ledger, tab_docs = st.tabs(
-    ["🛒 Best Odds", "🔥 Daily Card", "🎯 +EV Board", "🗓️ Fixtures", "⚖️ Arb & Middles",
+(tab_shop, tab_ticket, tab_card, tab_ev, tab_fix, tab_arb, tab_model, tab_ledger,
+ tab_docs) = st.tabs(
+    ["🛒 Best Odds", "🎟️ Today's 4", "🔥 Daily Card", "🎯 +EV Board", "🗓️ Fixtures", "⚖️ Arb & Middles",
      "🧪 Model Lab", "📒 Ledger & CLV", "📘 Methodology"]
 )
 
@@ -812,6 +820,234 @@ with tab_card:
                 st.caption(
                     f"Total {total_f * 100:.2f}% of bankroll at quarter-Kelly on the "
                     "conservative probability. Sized individually, not as one bet."
+                )
+
+
+# ============================================================== TODAY'S 4 ===
+with tab_ticket:
+    st.subheader("Today's 4: the day's strongest favourites, soccer and basketball together")
+    st.caption(
+        "Four selections to win their match, split between soccer and basketball as evenly "
+        "as the day allows, each a clear favourite on the fair line built from every book. "
+        "Rebuilt from that day's fixtures whenever you ask, so it works every day there are "
+        "games. The ranking is market evidence; it cannot see a late injury or a rested "
+        "star, so read the research notes and check the line-ups before you stake."
+    )
+
+    TICKET_SOCCER = {
+        **CARD_SOCCER,
+        "soccer_uefa_champs_league": "Champions League",
+        "soccer_uefa_europa_league": "Europa League",
+        "soccer_uefa_europa_conference_league": "Conference League",
+        "soccer_uefa_nations_league": "UEFA Nations League",
+        "soccer_fifa_world_cup": "FIFA World Cup",
+        "soccer_fifa_world_cup_qualifiers_europe": "World Cup Qualifiers (Europe)",
+        "soccer_africa_cup_of_nations": "Africa Cup of Nations",
+        "soccer_conmebol_copa_libertadores": "Copa Libertadores",
+        "soccer_fa_cup": "FA Cup",
+    }
+    in_season = {
+        x["key"] for g in ("Soccer", "Basketball") for x in sports_by_group.get(g, [])
+    }
+
+    t1, t2 = st.columns([1, 3])
+    with t1:
+        day_offset = st.radio("Day", [0, 1], horizontal=True, key="ticket_day",
+                              format_func=lambda d: "Today" if d == 0 else "Tomorrow")
+    right_now = datetime.now(UTC)
+    day_start, day_end = daily.betting_day(right_now, day_offset)
+    with t2:
+        st.caption(
+            f"Games starting **{day_start:%a %d %b %H:%M}** to **{day_end:%a %d %b %H:%M}** "
+            "UTC (the same as Ghana time). The day runs 08:00 to 08:00 so a night of NBA "
+            "stays on the day it belongs to. Building it costs one API credit per "
+            "competition that has a game that day."
+        )
+
+    if st.button("🎟️ Build the ticket", type="primary", key="ticket_build"):
+        st.session_state["ticket_request"] = day_offset
+
+    if st.session_state.get("ticket_request") == day_offset:
+        opens = max(day_start, right_now)
+
+        def playing(keys: dict) -> dict:
+            """The competitions in ``keys`` with a game still to start that day."""
+            out = {}
+            for key, title in keys.items():
+                if key not in in_season:
+                    continue
+                try:
+                    fixtures = cached_fixtures(key)
+                except Exception:  # noqa: BLE001 - one bad league must not sink the ticket
+                    continue
+                kicks = (parse_iso(f.get("commence_time")) for f in fixtures)
+                if any(k and opens <= k < day_end for k in kicks):
+                    out[key] = title
+            return out
+
+        def priced(keys: dict) -> list:
+            out = []
+            for key, title in keys.items():
+                try:
+                    found, _ = cached_h2h(key, "eu")
+                except odds_api.OddsAPIError as exc:
+                    st.warning(f"{title}: {exc}")
+                    continue
+                for e in found:
+                    e["_league"] = title
+                    e.setdefault("sport_key", key)
+                    e["_sport_key"] = key
+                    out.append(e)
+            return out
+
+        with st.spinner("Finding the day's games and pricing them..."):
+            soccer_today, basket_today = playing(TICKET_SOCCER), playing(CARD_BASKET)
+            ticket = daily.build_ticket(
+                priced(soccer_today), priced(basket_today), start=day_start, end=day_end,
+                now=right_now, devig_method=devig_method, shrink_k=shrink_k,
+            )
+        legs = ticket["selections"]
+        st.caption(
+            f"Scanned {len(soccer_today) + len(basket_today)} competition(s) with games: "
+            + (", ".join([*soccer_today.values(), *basket_today.values()]) or "none")
+            + f". {ticket['games']['Soccer']} soccer and {ticket['games']['Basketball']} "
+            f"basketball games still to start; {ticket['qualified']['Soccer']} and "
+            f"{ticket['qualified']['Basketball']} of them have a favourite that clears the bar "
+            f"(at least {daily.TICKET_MIN_PROB * 100:.0f}% to win, at least "
+            f"{daily.MIN_BOOKS} books in agreement, odds of {daily.TICKET_MIN_ODDS:.2f} or more)."
+        )
+
+        if not legs:
+            st.warning(
+                "**No selection qualifies for this day.** Nothing to bet is a real answer — "
+                "the ticket is never padded with a weaker pick."
+            )
+        else:
+            par = daily.parlay_analysis(legs)
+            kelly_stake = daily.ticket_stake(par, kelly_mult)
+            stake_frac = kelly_stake or daily.TICKET_FLAT_STAKE
+            stake = bankroll * stake_frac
+            st.markdown(
+                render.stat_tiles([
+                    ("Legs", f"{len(legs)}/{ticket['requested']}"),
+                    ("Combined odds", f"{par['combined_odds']:.2f}"),
+                    ("All legs win", f"{par['all_win_prob'] * 100:.0f}%"),
+                    ("Expected winners", f"{par['expected_winners']:.1f} of {len(legs)}"),
+                    ("Stake", f"{stake:.2f}"),
+                    ("Returns if it lands", f"{stake * par['combined_odds']:.2f}"),
+                ]),
+                unsafe_allow_html=True,
+            )
+            if ticket["short_by"]:
+                st.info(
+                    f"Only **{len(legs)}** of {ticket['requested']} legs cleared the evidence "
+                    "bar today. A shorter ticket is the honest answer."
+                )
+
+            notes = daily.research_notes(day_start.date().isoformat())
+            leg_notes = notes.get("legs", {})
+
+            def stars(n: int) -> str:
+                return "★" * n + "☆" * (5 - n)
+
+            rows = []
+            for s in legs:
+                note = leg_notes.get(s.selection, {})
+                rows.append({
+                    "Starts": fmt_when(s.commence_time),
+                    "Sport": s.sport,
+                    "Competition": s.league,
+                    "Match": f"{s.home} vs {s.away}",
+                    "Back to win": s.selection,
+                    "Win %": round(s.fair_prob * 100, 1),
+                    "Best odds": round(s.odds, 2),
+                    "Book": s.book,
+                    "Take no less than": round(s.fair_odds, 2),
+                    "EV %": round(s.ev * 100, 2),
+                    "Confidence": stars(note["stars"]) if note.get("stars")
+                    else "not researched",
+                    "Price estimate": stars(s.estimate_stars),
+                })
+            st.dataframe(
+                pd.DataFrame(rows), width="stretch", hide_index=True,
+                column_config={
+                    "Win %": st.column_config.NumberColumn(format="%.1f%%"),
+                    "Best odds": st.column_config.NumberColumn(format="%.2f"),
+                    "Take no less than": st.column_config.NumberColumn(format="%.2f"),
+                    "EV %": st.column_config.NumberColumn(format="%+.2f%%"),
+                },
+            )
+            st.caption(
+                "**Back to win** is the match-result market (1X2 in soccer, so a draw loses; "
+                "moneyline in basketball, overtime included). **Take no less than** is the "
+                "fair price: if your bookmaker offers less on a leg, that leg is priced "
+                "against you. **Price estimate** rates how tightly the books agree, not how "
+                "likely the team is to win."
+            )
+
+            if kelly_stake:
+                st.success(
+                    f"**Stake {stake:.2f} ({stake_frac * 100:.2f}% of bankroll).** At the best "
+                    f"prices the accumulator pays {par['combined_odds']:.2f} against a fair "
+                    f"{par['fair_parlay_odds']:.2f}, an edge of {par['parlay_ev'] * 100:+.1f}%."
+                )
+            else:
+                st.info(
+                    f"**Stake no more than {stake:.2f} ({stake_frac * 100:.1f}% of bankroll).** "
+                    f"The accumulator pays {par['combined_odds']:.2f} against a fair "
+                    f"{par['fair_parlay_odds']:.2f} ({par['parlay_ev'] * 100:+.1f}% expected "
+                    "value), so these are likely winners at about the right price, not "
+                    "underpriced ones. With no edge to size, the stake is a small flat amount."
+                )
+            st.warning(
+                f"All {len(legs)} winning together is **{par['all_win_prob'] * 100:.0f}%** "
+                f"likely, so this ticket loses about "
+                f"**{round(par['lose_everything_prob'] * 10)} times in 10** even though every "
+                "leg is a favourite. Never raise the next stake to win back a lost one."
+            )
+
+            if notes:
+                st.markdown(f"#### Research notes · {notes.get('updated', '')}")
+                if notes.get("verdict"):
+                    st.markdown(notes["verdict"])
+                for s in [*legs, *ticket["reserves"]]:
+                    note = leg_notes.get(s.selection)
+                    if note:
+                        st.markdown(
+                            f"- **{s.selection}** {stars(note['stars'])} — {note['note']}"
+                        )
+                if notes.get("sources"):
+                    with st.expander("Sources"):
+                        for title, url in notes["sources"]:
+                            st.markdown(f"- [{title}]({url})")
+            else:
+                st.info(
+                    "No research notes have been filed for this day, so the confidence "
+                    "column is empty. Check injuries, suspensions and expected line-ups for "
+                    "each leg before staking."
+                )
+
+            if ticket["reserves"]:
+                with st.expander("Reserves: next-best favourites if you drop a leg"):
+                    st.dataframe(
+                        pd.DataFrame([
+                            {
+                                "Starts": fmt_when(s.commence_time), "Sport": s.sport,
+                                "Match": f"{s.home} vs {s.away}", "Back to win": s.selection,
+                                "Win %": round(s.fair_prob * 100, 1),
+                                "Best odds": round(s.odds, 2), "Book": s.book,
+                                "Take no less than": round(s.fair_odds, 2),
+                            }
+                            for s in ticket["reserves"]
+                        ]),
+                        width="stretch", hide_index=True,
+                    )
+            with st.expander("The same four as separate bets"):
+                st.markdown(
+                    f"Backed singly you should expect about **{par['expected_winners']:.1f} "
+                    f"winners out of {len(legs)}**, and one upset costs one stake instead of "
+                    "the whole ticket. The accumulator trades that safety for a bigger "
+                    "payout; over many days, separate bets grow a bankroll more steadily."
                 )
 
 

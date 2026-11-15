@@ -103,6 +103,13 @@ def get_odds(sport_key: str, regions: str = "eu", markets: str = "h2h,totals") -
     )
 
 
+def get_events(sport_key: str) -> list:
+    """Upcoming fixtures for one sport key, without odds. No quota cost, so it
+    is the way to find out which competitions have games before paying for them."""
+    data, _ = _get(f"/sports/{sport_key}/events", {"dateFormat": "iso"})
+    return data
+
+
 def get_additional_markets(sport_key: str, regions: str = "eu") -> tuple:
     """BTTS / draw-no-bet / double-chance — mostly soccer-only, often not on every
     plan/region. Any failure here is swallowed by the caller; treat as best-effort."""

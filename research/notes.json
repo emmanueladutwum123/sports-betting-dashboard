@@ -1,0 +1,43 @@
+{
+  "2026-11-15": {
+    "updated": "Sun 15 Nov 2026, 18:00 UTC",
+    "verdict": "All four legs survive the team-news check, so the ticket stands as built. **Croatia is the weakest leg**: a draw is enough for them and a draw loses this bet. If you want a steadier fourth leg, swap Croatia for the Houston Rockets (first reserve). Confirm Mbappé and the NBA injury reports before staking, because those were still unsettled when this was written.",
+    "legs": {
+      "France": {
+        "stars": 4,
+        "note": "At home, second in the group on 10 points and needing the result to reach the quarter-finals. Turkey have lost all five group games and are without Kenan Yildiz (injured) and Ozan Kabak (suspended). Against that, France's defence is depleted (Saliba, Koundé, Kalulu out, Upamecano left camp) and reports conflict on whether Mbappé is fit."
+      },
+      "Croatia": {
+        "stars": 3,
+        "note": "At home against a Czech side on a run of at least five straight defeats and missing the suspended Ladislav Krejčí. But Croatia have one win and four defeats themselves, are without centre-back Josip Šutalo, and only need a draw to avoid finishing bottom, so they have no reason to chase a win late. The draw is the real risk here."
+      },
+      "Boston Celtics": {
+        "stars": 4,
+        "note": "At home with a clean injury report. Dallas are thin in the frontcourt (Dereck Lively out, Daniel Gafford reported out by one source) and Kyrie Irving could be rested. Boston play again on Monday, so a rested starter is possible; check the line-up."
+      },
+      "Oklahoma City Thunder": {
+        "stars": 3,
+        "note": "Sacramento are 1-11 and have lost five straight. Oklahoma City are 8-5 but on a three-game losing run, away from home, without Chet Holmgren, Jalen Williams and Cason Wallace, with Ajay Mitchell questionable. The price already reflects a short-handed Thunder."
+      },
+      "Houston Rockets": {
+        "stars": 4,
+        "note": "Reserve. Houston are 10-3 at a 4-9 Washington side that has Alex Sarr, Bub Carrington and Tre Johnson all questionable. Houston are without Fred VanVleet, Clint Capela and the suspended Marcus Smart; Steven Adams is probable to return."
+      },
+      "Atlanta Hawks": {
+        "stars": 3,
+        "note": "Reserve. Atlanta are 7-6 at a 1-12 Milwaukee side, but away from home and missing several rotation players, including Kingston Flemings."
+      }
+    },
+    "sources": [
+      ["France vs Turkiye: prediction, line-ups and team news (RotoWire)", "https://www.rotowire.com/soccer/article/france-vs-turkiye-prediction-predicted-lineups-team-news-146321"],
+      ["France vs Turkey: preview and team news (101 Great Goals)", "https://www.101greatgoals.com/match-previews/france-vs-turkey-team-news-line-ups-stats-preview-where-to-watch-nations-league-tv-channel-live-online-stream-prediction/"],
+      ["Croatia vs Czech Republic: preview and team news (Sports Mole)", "https://www.sportsmole.co.uk/football/croatia/preview/croatia-vs-czech-republic-prediction-team-news-lineups_609075.html"],
+      ["Croatia vs Czechia: statistical preview (WhoScored)", "https://www.whoscored.com/matches/1969852/preview/international-uefa-nations-league-a-2026-2027-croatia-czechia"],
+      ["Celtics injury news ahead of the Mavericks game (CelticsBlog)", "https://www.celticsblog.com/boston-celtics-news/148943/celtics-injury-news-mavericks-game"],
+      ["Mavericks vs Celtics prediction (Pick Dawgz)", "https://pickdawgz.com/nba-picks/mavericks-vs-celtics-prediction-11-15-2026-nba-picks-today/"],
+      ["Thunder vs Kings injury report (Yahoo Sports)", "https://sports.yahoo.com/articles/thunder-vs-kings-injury-report-155348350.html"],
+      ["Rockets vs Wizards injury report (ClutchPoints)", "https://clutchpoints.com/nba/nba-stories/rockets-wizards-injury-report-steven-adams-update"],
+      ["Hawks vs Bucks injury report (ClutchPoints)", "https://clutchpoints.com/nba/atlanta-hawks/hawks-vs-bucks-injury-report-kingston-flemings-playing"]
+    ]
+  }
+}

@@ -224,3 +224,61 @@ def test_a_longshot_parlay_is_not_reported_as_certain_loss():
     assert par["lose_everything_prob"] < 1.0
     assert f"{par['lose_everything_prob'] * 100:.0f}%" == "100%"   # the naive format lies
     assert par["all_win_prob"] > 0
+
+
+# --------------------------------------------------------------- daily ticket
+
+from src.daily import betting_day, build_ticket, ticket_stake  # noqa: E402
+
+
+def test_betting_day_keeps_overnight_games_on_the_day_they_belong_to():
+    start, end = betting_day(datetime(2026, 11, 16, 2, 10, tzinfo=UTC))
+    assert start == datetime(2026, 11, 15, 8, 0, tzinfo=UTC)
+    assert end == datetime(2026, 11, 16, 8, 0, tzinfo=UTC)
+    assert betting_day(NOW, offset_days=1)[0] == datetime(2026, 8, 30, 8, 0, tzinfo=UTC)
+
+
+def test_ticket_splits_evenly_between_the_two_sports():
+    soccer = [_liquid_event(f"S{i}", f"T{i}", 1.40, 3.2, "Liga", f"s{i}") for i in range(4)]
+    basket = [_liquid_event(f"B{i}", f"C{i}", 1.30, 3.9, "NBA", f"b{i}") for i in range(4)]
+    ticket = build_ticket(soccer, basket, now=NOW)
+    sports = [s.sport for s in ticket["selections"]]
+    assert sports.count("Soccer") == 2 and sports.count("Basketball") == 2
+    assert not ticket["short_by"] and len(ticket["reserves"]) == 4
+
+
+def test_ticket_fills_from_the_other_sport_when_one_is_short():
+    soccer = [_liquid_event("S0", "T0", 1.40, 3.2, "Liga", "s0")]
+    basket = [_liquid_event(f"B{i}", f"C{i}", 1.30, 3.9, "NBA", f"b{i}") for i in range(5)]
+    ticket = build_ticket(soccer, basket, now=NOW)
+    sports = [s.sport for s in ticket["selections"]]
+    assert sports.count("Soccer") == 1 and sports.count("Basketball") == 3
+
+
+def test_ticket_is_short_rather_than_padded_and_skips_started_games():
+    events = [
+        _liquid_event("A", "B", 1.40, 3.2, "Liga", "e1"),
+        _liquid_event("C", "D", 1.95, 1.95, "Liga", "e2"),         # coin flip
+        _liquid_event("E", "F", 1.40, 3.2, "Liga", "e3", hours=-1),  # kicked off
+        _liquid_event("G", "H", 1.05, 12.0, "Liga", "e4"),          # too short to be worth a leg
+    ]
+    ticket = build_ticket(events, [], now=NOW)
+    assert [s.selection for s in ticket["selections"]] == ["A"]
+    assert ticket["short_by"] == 3
+
+
+def test_ticket_stake_is_capped_and_zero_without_an_edge():
+    assert ticket_stake({"n": 4, "all_win_prob_conservative": 0.30, "combined_odds": 3.0}) == 0.0
+    assert ticket_stake({"n": 4, "all_win_prob_conservative": 0.50, "combined_odds": 3.0}) == 0.02
+    assert ticket_stake({"n": 0}) == 0.0
+
+
+def test_research_notes_are_read_per_day_and_missing_ones_are_empty(tmp_path):
+    from src.daily import research_notes
+
+    path = tmp_path / "notes.json"
+    path.write_text('{"2026-11-15": {"legs": {"France": {"stars": 4, "note": "x"}}}}')
+    assert research_notes("2026-11-15", path)["legs"]["France"]["stars"] == 4
+    assert research_notes("2026-11-16", path) == {}
+    assert research_notes("2026-11-15", tmp_path / "absent.json") == {}
+    assert research_notes("2026-11-15")["legs"]  # the filed notes parse
