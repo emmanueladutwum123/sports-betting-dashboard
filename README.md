@@ -330,7 +330,7 @@ a data-integrity check rather than a profit centre.
 | Tab | What it is for |
 |---|---|
 | 🛒 **Best Odds** | Best takeable price for every selection, net of commission, against fair value — plus a checker for prices from a book that is not in the feed. Start here. |
-| 🎟️ **Today's 4** | The day's four strongest favourites across soccer and basketball, split between the two sports, with combined odds, the chance all four land, a capped stake, reserves, and hand-filed research notes (`research/notes.json`) on team news. Ranked from prices; it never pads a short day. |
+| 🎟️ **Today's 4** | The day's four strongest favourites across soccer and basketball, split between the two sports, with combined odds, the chance all four land, a capped stake, the over/under line and prices for the same matches, reserves, and hand-filed research notes (`research/notes.json`) on team news. Ranked from prices; it never pads a short day. |
 | 🔥 **Daily Card** | The 5 best-evidenced soccer and 5 basketball selections in the next 24–72h, one per competition so the legs stay independent. Three ranking modes (most-likely / best-value / balanced), a liquidity gate, and exact Poisson-binomial accumulator arithmetic. Reports being short rather than padding. |
 | 🎯 **+EV Board** | Every selection priced above fair value at its best-paying book, ranked by EV, sized by fractional Kelly, with flags for anything that smells like a data artefact. Often empty. |
 | 🗓️ **Fixtures** | Per-match fair line, best price, book disagreement, and where sharp books disagree with the recreational consensus. |

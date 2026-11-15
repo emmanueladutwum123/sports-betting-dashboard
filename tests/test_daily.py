@@ -282,3 +282,45 @@ def test_research_notes_are_read_per_day_and_missing_ones_are_empty(tmp_path):
     assert research_notes("2026-11-16", path) == {}
     assert research_notes("2026-11-15", tmp_path / "absent.json") == {}
     assert research_notes("2026-11-15")["legs"]  # the filed notes parse
+
+
+# ------------------------------------------------------------ over / under
+
+from src.daily import main_total  # noqa: E402
+
+
+def _totals_event(over, under, line=2.5, n_books=6, extra=None):
+    books = {f"book{i}": {"totals": {line: {"Over": over, "Under": under}}} for i in range(n_books)}
+    books["pinnacle"] = {"totals": {line: {"Over": over, "Under": under}}}
+    books.update(extra or {})
+    return make_event(books, home="A", away="B", event_id="t1")
+
+
+def test_main_total_is_the_line_most_books_quote():
+    stray = {f"alt{i}": {"totals": {3.5: {"Over": 3.2, "Under": 1.33}}} for i in range(3)}
+    total = main_total(_totals_event(1.92, 1.92, extra=stray))
+    assert total["point"] == 2.5 and total["n_books"] == 7
+
+
+def test_balanced_total_is_called_what_it_is():
+    total = main_total(_totals_event(1.92, 1.92))
+    assert total["verdict"] == "none" and total["side"] is None
+    assert total["fair_over"] == pytest.approx(0.5, abs=0.01)
+
+
+def test_one_sided_total_is_a_lean_not_a_value_bet():
+    total = main_total(_totals_event(1.55, 2.45))
+    assert total["verdict"] == "lean" and total["side"] == "Over"
+    assert total["prob"] > 0.55 and total["ev"] < 0.01
+
+
+def test_a_price_above_fair_on_a_total_is_value():
+    generous = {"soft": {"totals": {2.5: {"Over": 2.15, "Under": 1.70}}}}
+    total = main_total(_totals_event(1.92, 1.92, extra=generous))
+    assert total["verdict"] == "value" and total["side"] == "Over"
+    assert total["odds"] == 2.15 and total["book"] and total["shrunk_prob"] <= total["prob"]
+
+
+def test_no_total_when_too_few_books_quote_it():
+    assert main_total(_totals_event(1.92, 1.92, n_books=1)) is None
+    assert main_total(make_event({"b": {"h2h": {"A": 2.0, "B": 2.0}}}, home="A", away="B")) is None

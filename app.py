@@ -879,8 +879,8 @@ with tab_ticket:
         st.caption(
             f"Games starting **{day_start:%a %d %b %H:%M}** to **{day_end:%a %d %b %H:%M}** "
             "UTC (the same as Ghana time). The day runs 08:00 to 08:00 so a night of NBA "
-            "stays on the day it belongs to. Building it costs one API credit per "
-            "competition that has a game that day."
+            "stays on the day it belongs to. Building it costs two API credits per "
+            "competition that has a game that day (match result plus over/under)."
         )
 
     if st.button("🎟️ Build the ticket", type="primary", key="ticket_build"):
@@ -908,7 +908,8 @@ with tab_ticket:
             out = []
             for key, title in keys.items():
                 try:
-                    found, _ = cached_h2h(key, "eu")
+                    # Match result and over/under together: two credits a league.
+                    found, _ = cached_odds(key, "eu")
                 except odds_api.OddsAPIError as exc:
                     st.warning(f"{title}: {exc}")
                     continue
@@ -917,8 +918,10 @@ with tab_ticket:
                     e.setdefault("sport_key", key)
                     e["_sport_key"] = key
                     out.append(e)
+                    ticket_events[e.get("id")] = e
             return out
 
+        ticket_events = {}
         with st.spinner("Finding the day's games and pricing them..."):
             soccer_today, basket_today = playing(TICKET_SOCCER), playing(CARD_BASKET)
             ticket = daily.build_ticket(
@@ -1002,6 +1005,76 @@ with tab_ticket:
                 "fair price: if your bookmaker offers less on a leg, that leg is priced "
                 "against you. **Price estimate** rates how tightly the books agree, not how "
                 "likely the team is to win."
+            )
+
+            # ---- Over/under on the same matches ----------------------------
+            st.markdown("#### Over/Under on the same four matches")
+            ou_rows, ou_calls = [], []
+            for s in legs:
+                total = daily.main_total(ticket_events.get(s.event_id, {}), devig_method, shrink_k)
+                match = f"{s.home} vs {s.away}"
+                if total is None:
+                    ou_rows.append({"Match": match, "What to do": "No over/under priced yet"})
+                    continue
+                unit = "goals" if s.sport == "Soccer" else "points"
+                if total["verdict"] == "value":
+                    from src.edge import kelly_fraction
+
+                    frac = min(daily.TICKET_MAX_STAKE, kelly_mult * kelly_fraction(
+                        total["shrunk_prob"], total["odds"]))
+                    call = f"✅ {total['side']} {total['point']:g}"
+                    stake_text = f"{bankroll * frac:.2f}" if frac > 0 else "0.00"
+                    ou_calls.append(
+                        f"**{match}: {total['side']} {total['point']:g} {unit}** at "
+                        f"{total['odds']:.2f} ({total['book']}) is priced above fair "
+                        f"({total['ev'] * 100:+.1f}%)."
+                    )
+                elif total["verdict"] == "lean":
+                    call = f"〰️ Lean {total['side']} {total['point']:g}"
+                    stake_text = f"up to {bankroll * daily.TICKET_FLAT_STAKE:.2f}"
+                    ou_calls.append(
+                        f"**{match}: {total['side']} {total['point']:g} {unit}** is the "
+                        f"likelier side ({total['prob'] * 100:.0f}%) but priced about fairly "
+                        f"({total['ev'] * 100:+.1f}%), so there is no edge in it."
+                    )
+                else:
+                    call, stake_text = "➖ No lean, skip", "—"
+                ou_rows.append({
+                    "Match": match,
+                    "Line": f"{total['point']:g} {unit}",
+                    "Over odds": round(total["over_odds"], 2),
+                    "Over book": total["over_book"],
+                    "Over chance %": round(total["fair_over"] * 100, 1),
+                    "Under odds": round(total["under_odds"], 2),
+                    "Under book": total["under_book"],
+                    "Under chance %": round(total["fair_under"] * 100, 1),
+                    "What to do": call,
+                    "Stake": stake_text,
+                    "Books": total["n_books"],
+                })
+            st.dataframe(
+                pd.DataFrame(ou_rows), width="stretch", hide_index=True,
+                column_order=["Match", "Line", "What to do", "Stake", "Over odds",
+                              "Over chance %", "Under odds", "Under chance %", "Over book",
+                              "Under book", "Books"],
+                column_config={
+                    "Over odds": st.column_config.NumberColumn(format="%.2f"),
+                    "Under odds": st.column_config.NumberColumn(format="%.2f"),
+                    "Over chance %": st.column_config.NumberColumn(format="%.1f%%"),
+                    "Under chance %": st.column_config.NumberColumn(format="%.1f%%"),
+                },
+            )
+            for call in ou_calls:
+                st.markdown(f"- {call}")
+            st.caption(
+                "**Line** is the total most bookmakers quote for the match: Over 2.5 goals "
+                "wins with three or more, Under 2.5 with two or fewer; basketball totals "
+                "count both teams' points, overtime included. It is the bookmakers' balance "
+                "point, so the two sides are usually close to a coin flip and **No lean, "
+                "skip** is the common answer. A stake appears only when a side is priced "
+                "above its fair chance; a lean is the likelier side at a fair price. These "
+                "are separate bets, not part of the four-leg ticket above, and an over/under "
+                "on a match is not independent of that match's winner."
             )
 
             if kelly_stake:

@@ -508,3 +508,66 @@ def ticket_stake(parlay: dict, kelly_multiplier: float = 0.25) -> float:
         return 0.0
     full = kelly_fraction(parlay["all_win_prob_conservative"], parlay["combined_odds"])
     return max(0.0, min(TICKET_MAX_STAKE, full * kelly_multiplier))
+
+
+# ------------------------------------------------------------ over / under
+
+# A side needs this much of the fair probability before it is called a lean,
+# and a totals line needs this many books before it is priced at all.
+TOTALS_LEAN_PROB = 0.55
+TOTALS_MIN_BOOKS = 3
+TOTALS_VALUE_EV = 0.01
+
+
+def main_total(event: dict, devig_method: str = DEFAULT_METHOD, shrink_k: float = 1.0) -> dict | None:
+    """The market's main over/under line for one event, with both sides priced.
+
+    The main line is the one most books quote -- the bookmakers' balance point,
+    where Over and Under sit closest to even money. Both sides get the fair
+    probability, the best available price and its expected value, and the row
+    says plainly whether either side is a bet: usually neither is, because a
+    balance point is by construction close to a coin flip.
+    """
+    from src.picks import _totals_lines
+
+    best = None
+    for line in _totals_lines(event):
+        view = MarketView(event, "totals", line, devig_method)
+        fair = view.anchor() if view.n_books >= TOTALS_MIN_BOOKS else None
+        if not fair or not fair.get("Over") or not fair.get("Under"):
+            continue
+        rank = (view.n_books, -abs(fair["Over"] - 0.5))
+        if best is None or rank > best[0]:
+            best = (rank, line, view, fair)
+    if best is None:
+        return None
+    _, line, view, fair = best
+
+    out = {"point": line, "n_books": view.n_books}
+    for side in ("Over", "Under"):
+        prices = [(q.net_price(side), q.title) for q in view.quotes if side in q.prices]
+        if not prices:
+            return None
+        price, book = max(prices)
+        key = side.lower()
+        out[f"fair_{key}"] = fair[side]
+        out[f"{key}_odds"], out[f"{key}_book"] = price, book
+        out[f"ev_{key}"] = ev_per_unit(fair[side], price)
+
+    side = "Over" if out["ev_over"] >= out["ev_under"] else "Under"
+    likelier = "Over" if out["fair_over"] >= out["fair_under"] else "Under"
+    key = side.lower()
+    if out[f"ev_{key}"] >= TOTALS_VALUE_EV:
+        sigma = dispersion(view.quotes, side)
+        out.update(
+            side=side, verdict="value", odds=out[f"{key}_odds"], book=out[f"{key}_book"],
+            prob=out[f"fair_{key}"], ev=out[f"ev_{key}"],
+            shrunk_prob=shrink_probability(out[f"fair_{key}"], sigma, shrink_k),
+        )
+    elif out[f"fair_{likelier.lower()}"] >= TOTALS_LEAN_PROB:
+        key = likelier.lower()
+        out.update(side=likelier, verdict="lean", odds=out[f"{key}_odds"],
+                   book=out[f"{key}_book"], prob=out[f"fair_{key}"], ev=out[f"ev_{key}"])
+    else:
+        out.update(side=None, verdict="none")
+    return out
