@@ -83,6 +83,7 @@ class Selection:
         "sport", "league", "event_id", "commence_time", "home", "away", "selection",
         "fair_prob", "shrunk_prob", "odds", "book", "book_key", "ev", "sigma",
         "n_books", "anchor_quality", "fair_odds", "is_home", "opponent",
+        "market_prob", "calibration",
     )
 
     def __init__(self, **kw):
@@ -105,6 +106,7 @@ class Selection:
             "Match": f"{self.home} vs {self.away}",
             "Backing": self.selection,
             "Win %": round((self.fair_prob or 0) * 100, 1),
+            "Market %": round((self.market_prob or 0) * 100, 1),
             "Conservative %": round((self.shrunk_prob or 0) * 100, 1),
             "Best odds": self.odds,
             "Book": self.book,
@@ -137,12 +139,13 @@ def candidates_from_event(
         return []
 
     out = []
+    anchor = view.anchor()
+    raw_anchor = view.raw_anchor()
     for name in view.outcomes:
-        anchor = view.anchor()
         fair = anchor.get(name)
         if not fair:
             continue
-        prices = [(q.title, q.key, q.prices[name]) for q in view.quotes if name in q.prices]
+        prices = [(q.title, q.key, q.net_price(name)) for q in view.quotes if name in q.prices]
         if not prices:
             continue
         book_title, book_key, price = max(prices, key=lambda x: x[2])
@@ -158,6 +161,8 @@ def candidates_from_event(
                 away=away,
                 selection=name,
                 fair_prob=fair,
+                market_prob=raw_anchor.get(name),
+                calibration=view.calibration,
                 shrunk_prob=shrink_probability(fair, sigma, shrink_k),
                 odds=price,
                 book=book_title,

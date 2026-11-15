@@ -101,7 +101,7 @@ class Opportunity:
         "event_id", "commence_time", "league", "home", "away", "market", "point",
         "selection", "book_key", "book_title", "odds", "fair_prob", "shrunk_prob",
         "sigma", "n_books", "anchor_quality", "ev", "edge", "kelly", "stake_fraction",
-        "flags", "model_prob",
+        "flags", "model_prob", "quoted_odds", "lag_minutes",
     )
 
     def __init__(self, **kw):
@@ -132,6 +132,7 @@ class Opportunity:
             "Selection": self.selection,
             "Book": self.book_title,
             "Odds": self.odds,
+            "Quoted": self.quoted_odds if self.quoted_odds else self.odds,
             "Fair odds": round(self.fair_odds, 2) if self.fair_odds else None,
             "Fair %": round((self.fair_prob or 0) * 100, 1),
             "EV %": round((self.ev or 0) * 100, 2),

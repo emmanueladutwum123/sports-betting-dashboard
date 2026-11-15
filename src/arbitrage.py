@@ -17,7 +17,7 @@ liquid market should be read as "something in this row is wrong", not as profit.
 
 from __future__ import annotations
 
-from src.market import best_price, collect_quotes
+from src.market import best_price, collect_quotes, net_odds
 
 
 def stake_split(prices: list, bankroll: float = 1.0) -> list:
@@ -82,6 +82,9 @@ def find_middles(event: dict, market_key: str = "totals") -> list:
                 pt, side, price = outcome.get("point"), outcome.get("name"), outcome.get("price")
                 if pt is None or not price or price <= 1:
                     continue
+                # Net of exchange commission, or half the "middles" are just
+                # an exchange's raw price beating a bookmaker's real one.
+                price = net_odds(bm.get("key"), price)
                 slot = by_line.setdefault(pt, {"Over": None, "Under": None})
                 cur = slot.get(side)
                 if cur is None or price > cur[0]:

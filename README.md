@@ -53,6 +53,115 @@ Four steps, each fixing one of the problems above:
 4. **Exclude the book under evaluation** from its own benchmark. Leaving it in is
    the same leakage as scoring a model on its training data, and it shrinks
    edges exactly when they are most real.
+5. **Correct the residual favourite–longshot bias.** Shin de-vigging removes
+   most of it, not all. Measured over 66,272 matches, the de-vigged close is
+   excellent in the middle of the probability scale and about **1.5 points too
+   low** at the top of it. One fitted exponent fixes that. Details below.
+
+### 1b. Calibration — the number next to a favourite is now honest
+
+Taking Pinnacle's closing 1X2 prices across 18 leagues and 10 seasons, de-vigging
+each with Shin, and comparing to what actually happened:
+
+| band | outcomes | mean price | actual | bias |
+|---|---:|---:|---:|---:|
+| 0.5–0.6 | 12,798 | 0.5459 | 0.5478 | +0.19pp |
+| 0.6–0.7 | 6,568 | 0.6444 | 0.6591 | +1.47pp |
+| 0.7–0.8 | 3,550 | 0.7440 | 0.7654 | +2.14pp |
+| 0.8–0.9 | 1,815 | 0.8410 | 0.8523 | +1.13pp |
+| **≥ 0.6** | **13,277** | **0.7063** | **0.7215** | **+1.52pp** |
+
+That last row is ±0.76pp at 95% — about four standard errors. It is not
+selection bias (noise in the estimate would push the realised rate *down*, not
+up), not one book (Pinnacle +1.66pp, cross-book average +1.85pp, Bet365
++1.77pp on a common sample), and not one period (positive in 8 of 10 seasons
+and 13 of 18 leagues).
+
+The fix is one parameter — raise the probability vector to a power and
+renormalise. Fitted by out-of-sample log loss it comes out at **1.0408** on
+1X2 and **1.0409** on Over/Under 2.5: two different markets, different numbers
+of outcomes, agreeing to four decimals.
+
+**Be clear about what this is worth.** As a forecast of the average match,
+almost nothing: 0.00011 nats of log loss in an expanding-window backtest,
+better in 7 of 9 seasons. It does not beat the market and it is not an edge.
+What it fixes is the band the Daily Card actually selects from:
+
+| band | bias before | bias after |
+|---|---:|---:|
+| p ≥ 0.6 | +1.61pp | +0.35pp |
+| p ≥ 0.7 | +1.78pp | +0.47pp |
+| p ≥ 0.8 | +1.15pp | −0.08pp |
+
+#### …and one exponent turned out to be the wrong shape
+
+A single global constant helps 10 of 18 leagues and **hurts** the other 8. The
+Bundesliga close does not understate favourites — it slightly overstates them —
+so sharpening it further pushed its bias from −1.0pp to −2.3pp. The Premier
+League is already near-unbiased and got worse too.
+
+Fitting a separate exponent per league overfits: at 2,000–5,500 matches each
+the estimates are noisy, and used raw they score *worse* out-of-sample than the
+single global number. The answer is partial pooling — shrink each league's
+estimate halfway toward the global one, with the shrinkage chosen
+out-of-sample:
+
+| shrinkage K | log loss | vs no calibration |
+|---|---:|---:|
+| 0.00 (global only) | 0.993347 | +0.000081 |
+| 0.25 | 0.993304 | +0.000123 |
+| **0.50** | **0.993298** | **+0.000129** |
+| 0.75 | 0.993329 | +0.000098 |
+| 1.00 (per-league raw) | 0.993396 | +0.000031 |
+
+The curve peaks in the middle and full per-league pooling is barely better than
+nothing — that is what overfitting looks like once you measure it.
+
+The pooled log-loss gain is still tiny. What partial pooling actually buys is
+that it stops breaking the sharp leagues. Mean absolute bias at p ≥ 0.6,
+averaged over the 18 leagues, out-of-sample:
+
+| | mean abs. bias |
+|---|---:|
+| no calibration | 2.55pp |
+| one global exponent | 2.09pp |
+| **shrunk per-league** | **1.65pp** |
+
+Shipped exponents range from **0.9854** (Bundesliga — sharpening *down*) to
+**1.0993** (Turkish Süper Lig). Soccer only; other sports pass through
+untouched, and a soccer league with no fitted entry falls back to the global
+number. Refit — including the per-league table — with
+`python -m scripts.fit_calibration`.
+
+### 1c. The best price you can actually take
+
+The backtest's one positive finding is that edge comes from *price*, not
+forecasting (see "So where is the edge?" below). The **Best Odds** tab is built
+on that: for every selection it shows who pays the most, the next-best price,
+what a typical book pays, and whether even the best price clears fair value.
+On a live 58-match board across 42 books, the median selection paid **5.3%
+more** at the best book than at the median one — and only 26 of 342 best
+prices were actually value. Both numbers matter.
+
+Four things make a raw "highest odds" column wrong, and each is handled:
+
+| Problem | What it did | Fix |
+|---|---|---|
+| **Exchange commission ignored** | Betfair's 7.60 pays 7.27 after 5%. Raw, the exchange looked like the best price when a bookmaker at 7.50 paid more — and it inflated every arbitrage and middle with an exchange leg. | Prices are compared and evaluated net (`EXCHANGE_COMMISSION` in `src/market.py`); de-vigging still uses the raw price. |
+| **Stale quotes** | The highest number on a board is disproportionately a book that stopped updating. | A quote more than 30 minutes behind its market's median update is flagged, dropped from the +EV board, and skipped when choosing the best price. |
+| **In-play matches** | The feed keeps returning a match after kick-off; books reprice at different speeds, so comparing them manufactures edges out of latency. | Everything that recommends a bet uses pre-match events only. |
+| **The same bet counted many times** | The +EV board listed one row per *book* clearing the threshold and sized each as an independent wager — and could stake Home and Draw on one match. | One row per selection at its best-paying book; one staked selection per market per match. |
+
+**Books you can use.** Pick yours under *Your bookmakers* and the best price
+becomes the best one you can take. The fair line is still built from every
+book: a price you cannot bet is still evidence about what the right price is.
+
+**Books that are not in the feed.** SportyBet and bet365 are in no licensed
+feed. *Check a price from your own bookmaker* takes the odds you are being
+offered and judges them against the same fair value — verdict, the lowest
+price at which it becomes a bet, and the stake. A price more than 20% above
+fair gets no verdict and no stake until it has been checked, because that is
+far more often a typo or a mismatched market than a gift.
 
 ### 2. Sizing that survives being wrong
 
@@ -149,6 +258,55 @@ handicaps and correct scores from **one internally consistent** score matrix, so
 its markets cannot contradict each other the way a book quoting each
 independently can.
 
+### Correction: the totals column above was scored against opening prices
+
+The O/U half of that table is not what it claims to be. The feed looked for a
+Pinnacle closing column named `PSCO>2.5`, which does not exist in these files,
+and silently fell through to `P>2.5` — the **opening** price. Every totals
+number above was therefore measured against a soft line, which is precisely the
+failure `src/backtest.py` warns about in its own docstring.
+
+The headline did not change — the model loses on totals either way — but the
+three small non-zero totals weights (Championship 0.025, Serie A 0.050, Belgium
+0.150) were fitted in-sample against a soft line and should be read as zero.
+Re-measured against the true closing price (`PC>2.5`), walk-forward over 10,876
+markets in 6 leagues:
+
+| forecaster | log loss |
+|---|---:|
+| market (Pinnacle close) | **0.672048** |
+| Dixon-Coles, goals only | 0.687644 |
+| Dixon-Coles, best goals/shots mix | 0.681384 |
+
+and with the blend weight fitted on the first half and scored on the second —
+the only honest way to fit it — adding the model to the market **loses**
+0.00062 ± 0.00050 nats. So the standing hypothesis that totals is where a goal
+model earns its keep is now tested, and it is false.
+
+### The model did get better — it just still does not beat the market
+
+Fitting Dixon-Coles to **shots on target** as well as goals, and mixing the two
+in log-rate space, is a real improvement. Walk-forward over 20,368 predictions:
+
+| shots weight | 1X2 log loss |
+|---|---:|
+| 0% (goals only) | 1.003511 |
+| 25% | 1.000200 |
+| **50%** | **0.999340** |
+| 75% | 1.001021 |
+| 100% (shots only) | 1.005441 |
+
+A flat optimum in the middle is what you would expect if the two signals carry
+roughly equal independent information: shots on target are a better-sampled
+measure of territorial control (~9 per match against 2.7 goals), goals carry
+the finishing that shots throw away.
+
+That gain is about **forty times** the size of the calibration effect. It still
+is not enough: the market's 0.9781 beats all of them, and the fitted blend
+weight against a sharp close remains exactly zero. Better ratings and better
+scoreline distributions, no betting edge. The Model Lab defaults to the 50/50
+mix and the slider goes back to 0 for the classic goals-only fit.
+
 ### A live bug this engine caught
 
 On first run against real data the +EV board showed **71 selections**, nearly all
@@ -169,8 +327,9 @@ a data-integrity check rather than a profit centre.
 
 | Tab | What it is for |
 |---|---|
+| 🛒 **Best Odds** | Best takeable price for every selection, net of commission, against fair value — plus a checker for prices from a book that is not in the feed. Start here. |
 | 🔥 **Daily Card** | The 5 best-evidenced soccer and 5 basketball selections in the next 24–72h, one per competition so the legs stay independent. Three ranking modes (most-likely / best-value / balanced), a liquidity gate, and exact Poisson-binomial accumulator arithmetic. Reports being short rather than padding. |
-| 🎯 **+EV Board** | Every selection priced above fair value, ranked by EV, sized by fractional Kelly, with flags for anything that smells like a data artefact. Often empty. |
+| 🎯 **+EV Board** | Every selection priced above fair value at its best-paying book, ranked by EV, sized by fractional Kelly, with flags for anything that smells like a data artefact. Often empty. |
 | 🗓️ **Fixtures** | Per-match fair line, best price, book disagreement, and where sharp books disagree with the recreational consensus. |
 | ⚖️ **Arb & Middles** | Riskless positions — and a live integrity check on the feed, since a large "arbitrage" almost always means a stale quote. |
 | 🧪 **Model Lab** | Fit Dixon-Coles on real historical results; price any matchup across five markets; run the walk-forward backtest. |
@@ -240,7 +399,7 @@ python scripts/run_backtest.py --totals SP1 2020,2021,2022,2023
 ### Tests
 
 ```bash
-python -m pytest tests/ -q      # 86 tests
+python -m pytest tests/ -q      # 196 tests
 ```
 
 ---
@@ -264,20 +423,23 @@ export the CSV to keep anything you care about.
 ## Layout
 
 ```
-app.py                      six-tab Streamlit UI
+app.py                      eight-tab Streamlit UI
 src/
   devig.py                  5 de-vig methods (Shin, power, additive, OR, multiplicative)
   market.py                 per-book de-vig, log-odds pooling, sharp-book weighting
+  calibration.py            residual favourite-longshot correction, fitted on 66k matches
   edge.py                   EV, Kelly, uncertainty shrinkage, slate exposure caps
   picks.py                  +EV scanner and per-event summaries
+  shop.py                   line shopping, pre-match filter, own-book price checker
   arbitrage.py              arbitrage and middles (doubles as a feed integrity check)
   blend.py                  log-odds model/market blending, weight fitted out-of-sample
   backtest.py               walk-forward vs closing prices, bankroll simulation
   ledger.py                 SQLite bet log, CLV tracking with significance gating
-  models/dixon_coles.py     bivariate Poisson goal model -> 5 consistent markets
+  models/dixon_coles.py     bivariate Poisson goal model (goals + shots on target)
   datafeeds/football_data.py  historical results + closing odds
 scripts/run_backtest.py     CLI backtest
-tests/                      86 tests
+scripts/fit_calibration.py  refit the calibration exponent against closing prices
+tests/                      196 tests
 ```
 
 ---
@@ -286,14 +448,24 @@ tests/                      86 tests
 
 - **Not a guaranteed-profit system.** No such thing exists. The backtest above
   says so explicitly.
+- **The calibration is not an edge.** It corrects a measured 1.5-point
+  understatement on favourites and is worth 0.0001 nats as a forecast. It makes
+  the displayed probability honest; it does not make it beat the market. Any
+  reading of it as a source of profit is wrong.
 - Odds move; the best price may be gone by the time you reach it.
 - Accounts that consistently beat the closing line **get limited or banned** —
   that is what CLV predicts, and books track it too.
 - A real edge still loses over long stretches. The max-drawdown column exists
   for a reason.
-- Bookmaker coverage is US/UK/EU via a licensed aggregator. **bet365, SportyBet
-  and Betway are not available through any legitimate API**, and this project
-  deliberately does not scrape sportsbooks.
+- Bookmaker coverage is US/UK/EU via a licensed aggregator. **bet365 and
+  SportyBet are not available through any legitimate API**, and this project
+  deliberately does not scrape sportsbooks; use the price checker on the Best
+  Odds tab for those. Betway and 1xBet do appear in the feed, but as their
+  UK/EU books — a regional site can quote a different price, so confirm it
+  there before staking.
+- Exchange commission is netted at each exchange's standard rate (Betfair 5%,
+  Smarkets and Matchbook 2%). If your account is on a different rate, the net
+  price shown for those rows is off by the difference.
 - Everything here is decision support with its uncertainty made visible. Stake
   only what you can afford to lose.
 

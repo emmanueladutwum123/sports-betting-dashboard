@@ -41,7 +41,14 @@ from src.edge import (
     evaluate,
     normalise_slate,
 )
-from src.market import MarketView, dispersion, is_sharp
+from src.market import (
+    STALE_AFTER_MINUTES,
+    MarketView,
+    commission,
+    dispersion,
+    is_sharp,
+    staleness,
+)
 from src.probability import confidence_stars, fmt_stars
 
 # Markets scanned by default. Totals are enumerated per distinct line.
@@ -68,8 +75,17 @@ def scan_event(
     shrink_k: float = DEFAULT_SHRINK_K,
     model_probs: dict | None = None,
     include_negative: bool = False,
+    books: set | None = None,
 ) -> list:
     """Every +EV selection on one event, ranked by expected value.
+
+    ``books`` restricts which books' prices are *offered* as bets -- the ones
+    you actually hold an account with. It never restricts the fair line, which
+    is still built from every book in the feed: a price you cannot take is
+    still evidence about what the right price is.
+
+    Prices are evaluated net of exchange commission, and a quote that has
+    fallen behind the rest of its market is flagged as stale.
 
     ``model_probs`` optionally supplies an independent forecast keyed by market
     (``{"h2h": {...}, "totals_2.5": {...}}``); when present it is already
@@ -87,21 +103,37 @@ def scan_event(
         model_key = market_key if point is None else f"{market_key}_{point}"
         model_for_market = (model_probs or {}).get(model_key)
 
+        lag = staleness(view.quotes)
         for quote in view.quotes:
+            if books is not None and quote.key not in books:
+                continue
             anchor = view.anchor(exclude_book=quote.key)
             if not anchor:
                 continue
             if model_for_market:
                 anchor = {k: model_for_market.get(k, v) for k, v in anchor.items()}
 
-            for selection, price in quote.prices.items():
+            for selection, quoted in quote.prices.items():
                 fair = anchor.get(selection)
                 if not fair:
                     continue
+                # What the bet pays, not what the screen says.
+                price = quote.net_price(selection)
                 sigma = dispersion(view.quotes, selection)
                 metrics = evaluate(fair, price, sigma, kelly_multiplier, shrink_k)
                 if not include_negative and metrics["ev"] < min_ev:
                     continue
+
+                flags = classify(metrics["ev"], sigma, view.n_books, view.anchor_quality())
+                behind = lag.get(quote.key, 0.0)
+                if behind > STALE_AFTER_MINUTES:
+                    flags.append(
+                        f"stale-quote: {behind:.0f} min behind the market, may be gone"
+                    )
+                if commission(quote.key):
+                    flags.append(
+                        f"exchange: {commission(quote.key):.0%} commission already deducted"
+                    )
 
                 found.append(
                     Opportunity(
@@ -116,6 +148,8 @@ def scan_event(
                         book_key=quote.key,
                         book_title=quote.title,
                         odds=price,
+                        quoted_odds=quoted,
+                        lag_minutes=behind,
                         fair_prob=fair,
                         shrunk_prob=metrics["shrunk_prob"],
                         model_prob=(model_for_market or {}).get(selection),
@@ -126,7 +160,7 @@ def scan_event(
                         edge=metrics["edge"],
                         kelly=metrics["kelly"],
                         stake_fraction=metrics["stake_fraction"],
-                        flags=classify(metrics["ev"], sigma, view.n_books, view.anchor_quality()),
+                        flags=flags,
                     )
                 )
 
@@ -142,15 +176,69 @@ def scan_slate(
     shrink_k: float = DEFAULT_SHRINK_K,
     exposure_cap: float = DEFAULT_EXPOSURE_CAP,
     drop_flagged: bool = True,
+    best_only: bool = False,
+    books: set | None = None,
 ) -> list:
-    """Scan many events and size the whole slate against one bankroll."""
+    """Scan many events and size the whole slate against one bankroll.
+
+    ``best_only`` collapses the board to one row per selection -- the book
+    paying the most for it -- and stakes at most one selection per market on
+    each match. Without it the same bet appears once per book that clears the
+    threshold and every copy is sized as though it were a separate, independent
+    wager, which overstates both the number of opportunities and the exposure.
+    """
     out = []
     for event in events:
-        out.extend(scan_event(event, min_ev, devig_method, kelly_multiplier, shrink_k))
+        out.extend(
+            scan_event(event, min_ev, devig_method, kelly_multiplier, shrink_k, books=books)
+        )
     if drop_flagged:
-        out = [o for o in out if not any(f.startswith("implausible-EV") for f in o.flags)]
+        out = [o for o in out if not any(f.startswith(DROPPED_FLAGS) for f in o.flags)]
     out.sort(key=lambda o: -(o.ev or 0))
+    if best_only:
+        out = one_stake_per_market(best_per_selection(out))
     return normalise_slate(out, exposure_cap)
+
+
+# Flags that mean "this number is probably not a real, takeable price".
+DROPPED_FLAGS = ("implausible-EV", "stale-quote")
+
+
+def selection_key(o) -> tuple:
+    return (o.event_id, o.home, o.away, o.market, o.point, o.selection)
+
+
+def best_per_selection(opportunities: list) -> list:
+    """The best-paying book for each selection, order preserved.
+
+    Ties go to the first seen, which after an EV sort is the higher-EV row --
+    the one judged against the tighter leave-one-out benchmark.
+    """
+    best = {}
+    for o in opportunities:
+        key = selection_key(o)
+        if key not in best or (o.odds or 0) > (best[key].odds or 0):
+            best[key] = o
+    return [o for o in opportunities if best[selection_key(o)] is o]
+
+
+def one_stake_per_market(opportunities: list) -> list:
+    """Zero the stake on all but the best-EV selection per market per match.
+
+    Home and Draw on one match cannot both win; Over 2.5 and Over 2.75 nearly
+    always win or lose together. Kelly sizing treats each row as independent,
+    so staking several of them is the same money on one opinion, sized twice.
+    """
+    seen = set()
+    for o in sorted(opportunities, key=lambda o: -(o.ev or 0)):
+        key = (o.event_id, o.home, o.away, o.market)
+        if key in seen:
+            if (o.stake_fraction or 0) > 0:
+                o.stake_fraction = 0.0
+                o.flags.append("not staked: overlaps a better selection on this match")
+        else:
+            seen.add(key)
+    return opportunities
 
 
 # --------------------------------------------------------------------------
@@ -169,7 +257,7 @@ def summarize_h2h(event: dict, devig_method: str = DEFAULT_METHOD) -> dict | Non
 
     outcomes = {}
     for name, fair in anchor.items():
-        prices = [(q.title, q.prices[name]) for q in view.quotes if name in q.prices]
+        prices = [(q.title, q.net_price(name)) for q in view.quotes if name in q.prices]
         if not prices:
             continue
         best_book, best_price = max(prices, key=lambda x: x[1])
@@ -216,7 +304,7 @@ def best_total_bet(event: dict, devig_method: str = DEFAULT_METHOD) -> dict | No
 
         entry = {"point": line, "book_count": view.n_books, "stars": confidence_stars(view.n_books)}
         for side in ("Over", "Under"):
-            prices = [(q.title, q.prices[side]) for q in view.quotes if side in q.prices]
+            prices = [(q.title, q.net_price(side)) for q in view.quotes if side in q.prices]
             if not prices:
                 break
             book, price = max(prices, key=lambda x: x[1])

@@ -34,9 +34,28 @@ from src.blend import blend_probs, brier, log_loss, optimal_weight
 from src.datafeeds.football_data import to_matches
 from src.devig import DEFAULT_METHOD, devig
 from src.edge import ev_per_unit, kelly_fraction
-from src.models.dixon_coles import DixonColesModel
+from src.models.dixon_coles import SHOT_WEIGHT, DixonColesModel, ShotAugmentedDixonColes
 
 _OUTCOMES = ("home", "draw", "away")
+
+
+def _fit(window: list, xi: float, cutoff, shot_weight: float):
+    """Fit whichever model ``shot_weight`` asks for, on one training window.
+
+    Returns ``None`` instead of raising when the window is unusable, because a
+    walk-forward that dies on one bad refit reports nothing at all, which is
+    strictly less useful than reporting the matches it could evaluate.
+    """
+    try:
+        if shot_weight <= 0.0:
+            return DixonColesModel(max_goals=10).fit(
+                to_matches(window), xi=xi, reference_date=cutoff
+            )
+        return ShotAugmentedDixonColes(max_goals=10, shot_weight=shot_weight).fit(
+            window, xi=xi, reference_date=cutoff
+        )
+    except (ValueError, RuntimeError):
+        return None
 
 
 def market_probs_from_row(row: str, key: str = "psc", method: str = DEFAULT_METHOD) -> dict | None:
@@ -57,6 +76,7 @@ def walk_forward(
     max_train_days: int = 1095,
     price_key: str = "psc",
     devig_method: str = DEFAULT_METHOD,
+    shot_weight: float = SHOT_WEIGHT,
 ) -> dict:
     """Refit-and-predict across a chronological match list.
 
@@ -78,12 +98,7 @@ def walk_forward(
             ]
             if len(window) < min_train:
                 window = rows[:i]
-            try:
-                model = DixonColesModel(max_goals=10).fit(
-                    to_matches(window), xi=xi, reference_date=cutoff
-                )
-            except (ValueError, RuntimeError):
-                model = None
+            model = _fit(window, xi, cutoff, shot_weight)
             last_fit_at = i
 
         row = rows[i]
@@ -257,14 +272,24 @@ def walk_forward_totals(
     max_train_days: int = 1095,
     line: float = 2.5,
     devig_method: str = DEFAULT_METHOD,
+    shot_weight: float = SHOT_WEIGHT,
 ) -> dict:
     """The same walk-forward, but on Over/Under 2.5 goals.
 
-    This is the hypothesis worth testing. A goal model has no business beating a
-    sharp 1X2 close -- that market is the most heavily traded on the board. But
-    the model's totals price falls out of the *same* fitted score matrix as its
-    1X2 price, for free, and the totals market is thinner and more mechanically
-    priced. If a Dixon-Coles fit adds anything anywhere, this is where.
+    This was the hypothesis worth testing: a goal model has no business beating
+    a sharp 1X2 close, but its totals price falls out of the same fitted score
+    matrix for free, and the totals market is thinner. If a Dixon-Coles fit
+    added anything anywhere, this was where.
+
+    Tested against the true closing price, it does not. See the table in
+    :mod:`src.models.dixon_coles` -- the market wins by 0.0094 nats and an
+    honestly-fitted blend loses. The function is kept because the measurement
+    is worth being able to repeat, not because the answer is encouraging.
+
+    Note ``price_key`` semantics: ``ou25_psc`` is the Pinnacle *closing* price
+    and is the only one of these worth scoring against. ``ou25_pso`` is the
+    opening price and exists so the gap between the two can be shown rather
+    than accidentally relied on.
     """
     rows = sorted(rows, key=lambda r: r["date"])
     model_preds, market_preds, actuals, kept = [], [], [], []
@@ -276,12 +301,7 @@ def walk_forward_totals(
             window = [r for r in rows[:i] if (cutoff - r["date"]) <= timedelta(days=max_train_days)]
             if len(window) < min_train:
                 window = rows[:i]
-            try:
-                model = DixonColesModel(max_goals=10).fit(
-                    to_matches(window), xi=xi, reference_date=cutoff
-                )
-            except (ValueError, RuntimeError):
-                model = None
+            model = _fit(window, xi, cutoff, shot_weight)
             last_fit_at = i
 
         row = rows[i]

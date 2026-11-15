@@ -1,7 +1,10 @@
 """Quantitative betting research dashboard.
 
-Six tabs, in the order you should actually use them:
+Tabs, in the order you should actually use them:
 
+Best Odds      who pays the most for every selection, whether even that is
+               enough, and a checker for prices from your own bookmaker.
+Daily Card     the strongest-evidence selections across many competitions.
 +EV Board      every selection currently priced above its fair value, ranked by
                expected value and sized by fractional Kelly.
 Fixtures       per-match breakdown: fair line, best price, book disagreement.
@@ -20,9 +23,24 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from src import arbitrage, daily, form, ledger, odds_api, picks, render  # noqa: E402
+from src import (  # noqa: E402
+    arbitrage,
+    calibration,
+    daily,
+    form,
+    ledger,
+    odds_api,
+    picks,
+    render,
+    shop,
+)
 from src.devig import METHODS  # noqa: E402
-from src.edge import DEFAULT_EXPOSURE_CAP, DEFAULT_KELLY_FRACTION, DEFAULT_SHRINK_K  # noqa: E402
+from src.edge import (  # noqa: E402
+    DEFAULT_EXPOSURE_CAP,
+    DEFAULT_KELLY_FRACTION,
+    DEFAULT_SHRINK_K,
+    normalise_slate,
+)
 
 st.set_page_config(page_title="Quant Betting Research", layout="wide", page_icon="📊")
 st.markdown(render.inject_css(), unsafe_allow_html=True)
@@ -78,14 +96,17 @@ def cached_history(division: str, years: tuple):
 
 
 @st.cache_resource(show_spinner="Fitting Dixon-Coles...")
-def cached_model(division: str, years: tuple, xi: float):
+def cached_model(division: str, years: tuple, xi: float, shot_weight: float = None):
     from src.datafeeds.football_data import to_matches
-    from src.models.dixon_coles import DixonColesModel
+    from src.models.dixon_coles import SHOT_WEIGHT, DixonColesModel, ShotAugmentedDixonColes
 
     rows = cached_history(division, years)
     if len(rows) < 100:
         return None, rows
-    return DixonColesModel(max_goals=10).fit(to_matches(rows), xi=xi), rows
+    weight = SHOT_WEIGHT if shot_weight is None else shot_weight
+    if weight <= 0.0:
+        return DixonColesModel(max_goals=10).fit(to_matches(rows), xi=xi), rows
+    return ShotAugmentedDixonColes(max_goals=10, shot_weight=weight).fit(rows, xi=xi), rows
 
 
 try:
@@ -107,12 +128,23 @@ regions = st.sidebar.multiselect(
 )
 regions_str = ",".join(regions) if regions else "eu"
 
+# Preselect the most heavily traded competitions that are in season, rather
+# than whatever sorts first alphabetically: more books quote them, so the fair
+# line is tighter and there are more prices to shop between.
+PREFERRED_LEAGUES = (
+    "soccer_epl", "soccer_uefa_champs_league", "soccer_spain_la_liga",
+    "soccer_italy_serie_a", "soccer_germany_bundesliga", "soccer_france_ligue_one",
+    "basketball_nba", "basketball_euroleague", "baseball_mlb",
+)
+
 selected_leagues = {}
 for group in groups:
     available = sports_by_group.get(group, [])
     titles = [x["title"] for x in available]
+    by_key = {x["key"]: x["title"] for x in available}
+    preferred = [by_key[k] for k in PREFERRED_LEAGUES if k in by_key][:3]
     selected_leagues[group] = st.sidebar.multiselect(
-        f"{group} leagues", titles, default=titles[:3]
+        f"{group} leagues", titles, default=preferred or titles[:3]
     )
 
 st.sidebar.header("Model & staking")
@@ -195,10 +227,233 @@ events, quota_left = ([], None)
 if groups and any(t for _, t in leagues_key):
     events, quota_left = load_events(tuple(groups), leagues_key, regions_str)
 
-tab_card, tab_ev, tab_fix, tab_arb, tab_model, tab_ledger, tab_docs = st.tabs(
-    ["🔥 Daily Card", "🎯 +EV Board", "🗓️ Fixtures", "⚖️ Arb & Middles", "🧪 Model Lab",
-     "📒 Ledger & CLV", "📘 Methodology"]
+# Anything that recommends a bet works from matches that have not started. In
+# play, books reprice at different speeds and the gaps between them are latency,
+# not value.
+upcoming, in_play = shop.split_upcoming(events)
+in_play_ids = {e.get("id") for e in in_play}
+
+st.sidebar.header("Your bookmakers")
+feed_books = shop.books_in(events)
+my_book_keys = st.sidebar.multiselect(
+    "Books I can bet with", list(feed_books), format_func=lambda k: feed_books[k],
+    help="Leave empty to shop every book in the feed. Pick yours and the best price "
+         "shown is the best one you can actually take — fair value is still built "
+         "from all of them.",
 )
+my_books = set(my_book_keys) or None
+st.sidebar.caption(
+    "Book not listed (SportyBet, bet365…)? Use **Check a price from your own "
+    "bookmaker** on the Best Odds tab."
+)
+
+tab_shop, tab_card, tab_ev, tab_fix, tab_arb, tab_model, tab_ledger, tab_docs = st.tabs(
+    ["🛒 Best Odds", "🔥 Daily Card", "🎯 +EV Board", "🗓️ Fixtures", "⚖️ Arb & Middles",
+     "🧪 Model Lab", "📒 Ledger & CLV", "📘 Methodology"]
+)
+
+# =============================================================== BEST ODDS ===
+with tab_shop:
+    st.subheader("Best available price for every selection")
+    st.caption(
+        "Same bet, same outcome, more money back: taking the best price instead of a "
+        "typical one is the only edge here that needs no forecasting. Prices are net of "
+        "exchange commission, stale quotes are set aside, and every row is judged against "
+        "fair value — because the best price on the board is usually still not a bet."
+    )
+    if not events:
+        st.info("Select at least one league in the sidebar to compare prices.")
+    elif not upcoming:
+        st.info("Every loaded match has already kicked off. Pick another league.")
+    else:
+        if in_play:
+            st.caption(f"{len(in_play)} in-play match(es) excluded — live prices are not comparable.")
+        lines = shop.shop_slate(
+            upcoming, devig_method=devig_method, kelly_multiplier=kelly_mult,
+            shrink_k=shrink_k, books=my_books, min_ev=min_ev,
+        )
+        value_lines = [ln for ln in lines if ln.verdict == shop.VALUE]
+        # Stakes on the value rows share one bankroll: at most one per market per
+        # match, then scaled to the exposure cap -- the same rules as the +EV board.
+        normalise_slate(
+            picks.one_stake_per_market([ln.best for ln in value_lines]), exposure_cap
+        )
+        gains = sorted(ln.shop_gain for ln in lines)
+        st.markdown(
+            render.stat_tiles([
+                ("Matches", len(upcoming)),
+                ("Selections priced", len(lines)),
+                ("Value at best price", len(value_lines)),
+                ("Median gain from shopping",
+                 f"{gains[len(gains) // 2] * 100:+.1f}%" if gains else "—"),
+                ("Books compared", len(feed_books) if my_books is None else len(my_books)),
+            ]),
+            unsafe_allow_html=True,
+        )
+
+        f1, f2, f3 = st.columns([1, 1, 2])
+        with f1:
+            market_filter = st.selectbox("Market", ["All", "Match result", "Totals"])
+        with f2:
+            show = st.selectbox("Show", ["Value only", "Value + fair", "Everything"], index=1)
+        with f3:
+            match_names = sorted({f"{e.get('home_team')} vs {e.get('away_team')}" for e in upcoming})
+            match_filter = st.multiselect("Matches", match_names, placeholder="All matches")
+
+        def _keep(ln):
+            if market_filter == "Match result" and ln.best.market != "h2h":
+                return False
+            if market_filter == "Totals" and ln.best.market != "totals":
+                return False
+            if show == "Value only" and ln.verdict != shop.VALUE:
+                return False
+            if show == "Value + fair" and ln.verdict == shop.SKIP:
+                return False
+            return not match_filter or f"{ln.best.home} vs {ln.best.away}" in match_filter
+
+        shown = [ln for ln in lines if _keep(ln)]
+        if not shown:
+            st.success(
+                "Nothing matches that filter. If you asked for value only, that is the "
+                "market working — no book is currently paying more than fair for these "
+                "selections, so the right stake is zero."
+            )
+        else:
+            rows = []
+            for ln in shown:
+                row = ln.as_row(bankroll)
+                row["Starts"] = fmt_when(row["Starts"])
+                rows.append(row)
+            st.dataframe(
+                pd.DataFrame(rows), width="stretch", hide_index=True,
+                # The decision first; the supporting detail to the right.
+                column_order=[
+                    "Verdict", "Match", "Market", "Selection", "Best odds", "Book",
+                    "Fair odds", "EV %", "Stake", "Stake %", "Next best", "Typical odds",
+                    "Shop gain %", "Win %", "Starts", "League", "Books", "Notes",
+                ],
+                column_config={
+                    "Best odds": st.column_config.NumberColumn(format="%.2f"),
+                    "Shop gain %": st.column_config.NumberColumn(
+                        format="%+.2f%%",
+                        help="Extra return from the best price over the median book's price.",
+                    ),
+                    "EV %": st.column_config.NumberColumn(
+                        format="%+.2f%%",
+                        help="Expected profit per unit staked at the best price, against a "
+                             "fair line built without the book offering it.",
+                    ),
+                    "Stake %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Stake": st.column_config.NumberColumn(format="%.2f"),
+                    "Win %": st.column_config.NumberColumn(format="%.1f%%"),
+                },
+            )
+            st.caption(
+                "**Best odds** is what a winning bet pays after any exchange commission. "
+                "**Typical odds** is the median book. **Fair odds** is the no-margin price; "
+                "only a best price *above* it is value. A stake of 0 on a positive-EV row "
+                "means the edge is smaller than the books' disagreement about the true "
+                "price. Odds move — confirm the price on the book before staking."
+            )
+
+        st.divider()
+        st.markdown("#### Check a price from your own bookmaker")
+        st.caption(
+            "SportyBet, bet365 and some regional books are not in any licensed feed. Their "
+            "prices can still be judged: type in what you are being offered and it is "
+            "measured against the same fair value as everything above."
+        )
+        by_label = {
+            f"{e.get('home_team')} vs {e.get('away_team')} · {fmt_when(e.get('commence_time'))}": e
+            for e in upcoming
+        }
+        p1, p2, p3, p4 = st.columns([3, 2, 2, 1])
+        with p1:
+            chosen_event = by_label[st.selectbox("Match", list(by_label), key="pc_match")]
+        check_markets = shop.markets_for(chosen_event, devig_method)
+        if not check_markets:
+            st.info("No market on this match has enough books to build a fair price.")
+        else:
+            with p2:
+                mk_label = st.selectbox("Market", [m[0] for m in check_markets], key="pc_market")
+            _, mk_key, mk_point, mk_selections = next(m for m in check_markets if m[0] == mk_label)
+            with p3:
+                sel_name = st.selectbox("Selection", mk_selections, key="pc_sel")
+            # Start from the typical book's price for this exact selection, and
+            # reset whenever the selection changes: a leftover number from a
+            # different bet would be judged as if it were an offer on this one.
+            typical = shop.check_price(chosen_event, mk_key, mk_point, sel_name, 2.0,
+                                       devig_method)
+            start_odds = max(1.01, round((typical or {}).get("typical_odds") or 2.0, 2))
+            with p4:
+                offered = st.number_input(
+                    "Your odds", min_value=1.01, value=start_odds, step=0.01, format="%.2f",
+                    key=f"pc_odds_{chosen_event.get('id')}_{mk_label}_{sel_name}",
+                )
+            res = shop.check_price(
+                chosen_event, mk_key, mk_point, sel_name, offered, devig_method,
+                kelly_mult, shrink_k, min_ev,
+            )
+            if res is None:
+                st.info("No fair price available for that selection.")
+            else:
+                # An implausible price gets no verdict and no stake until it
+                # has been checked -- sizing a typo is how a bankroll goes.
+                st.markdown(
+                    render.stat_tiles([
+                        ("Verdict", "⚠️ Verify first" if res["suspicious"] else res["verdict"]),
+                        ("Your odds", f"{res['offered_odds']:.2f}"),
+                        ("Fair odds", f"{res['fair_odds']:.2f}"),
+                        ("Value starts at", f"{res['min_odds_for_value']:.2f}"),
+                        ("EV", f"{res['ev'] * 100:+.2f}%"),
+                        ("Stake", "—" if res["suspicious"]
+                         else f"{bankroll * res['stake_fraction']:.2f}"),
+                    ]),
+                    unsafe_allow_html=True,
+                )
+                compare = (
+                    f"The best price in the feed is **{res['best_feed_odds']:.2f}** at "
+                    f"{res['best_feed_book']} (typical book: {res['typical_odds']:.2f}); yours "
+                    f"beats {res['beats_books']} of {res['n_books']} books."
+                )
+                basis = (
+                    f"Fair win probability **{res['fair_prob'] * 100:.1f}%** from "
+                    f"{res['n_books']} books ({res['anchor_quality']} anchor, "
+                    f"{res['sigma'] * 100:.1f}pp disagreement)."
+                )
+                if res["suspicious"]:
+                    st.warning(
+                        f"**{res['ev'] * 100:+.1f}% EV is too good to take at face value.** "
+                        "Check that the market matches exactly (1X2 vs draw-no-bet vs double "
+                        "chance, the same totals line, 90 minutes vs including extra time) and "
+                        f"that the odds are typed correctly. {compare}"
+                    )
+                elif res["verdict"] == shop.VALUE:
+                    st.success(
+                        f"**Value.** {res['offered_odds']:.2f} is above the fair "
+                        f"{res['fair_odds']:.2f}. Quarter-Kelly on the conservative probability "
+                        f"sizes it at **{res['stake_fraction'] * 100:.2f}% of bankroll "
+                        f"({bankroll * res['stake_fraction']:.2f})**. {basis} {compare}"
+                    )
+                elif res["verdict"] == shop.NOISE:
+                    st.info(
+                        f"**Positive on paper, not stakeable.** The edge "
+                        f"({res['ev'] * 100:+.2f}%) is smaller than the books' disagreement "
+                        f"about the true price, so the sized stake is zero. {basis} {compare}"
+                    )
+                elif res["verdict"] == shop.FAIR:
+                    st.info(
+                        f"**About fair — no edge.** You would need "
+                        f"**{res['min_odds_for_value']:.2f} or better** for this to be a bet. "
+                        f"{basis} {compare}"
+                    )
+                else:
+                    st.error(
+                        f"**Overpriced — skip, or take it elsewhere.** At "
+                        f"{res['offered_odds']:.2f} you give up {abs(res['ev']) * 100:.1f}% of "
+                        f"every stake in expectation. It becomes a bet at "
+                        f"**{res['min_odds_for_value']:.2f} or better**. {basis} {compare}"
+                    )
 
 # ============================================================== DAILY CARD ===
 with tab_card:
@@ -284,6 +539,11 @@ with tab_card:
                     continue
                 for e in found:
                     e["_league"] = titles.get(key, key)
+                    # The feed already carries sport_key, but set it explicitly
+                    # so the calibration layer cannot silently fall back to
+                    # identity if the feed ever stops sending it.
+                    e.setdefault("sport_key", key)
+                    e["_sport_key"] = key
                     out.append(e)
             return out
 
@@ -445,15 +705,17 @@ with tab_ev:
     if not events:
         st.info("Select at least one league in the sidebar to scan.")
     else:
+        # One row per selection at its best-paying book, pre-match only.
         opportunities = picks.scan_slate(
-            events, min_ev=min_ev, devig_method=devig_method,
+            upcoming, min_ev=min_ev, devig_method=devig_method,
             kelly_multiplier=kelly_mult, shrink_k=shrink_k, exposure_cap=exposure_cap,
+            best_only=True, books=my_books,
         )
         staked = [o for o in opportunities if (o.stake_fraction or 0) > 0]
 
         st.markdown(
             render.stat_tiles([
-                ("Events scanned", len(events)),
+                ("Events scanned", len(upcoming)),
                 ("+EV selections", len(opportunities)),
                 ("Passing shrinkage", len(staked)),
                 ("Total exposure", f"{sum(o.stake_fraction or 0 for o in staked) * 100:.1f}%"),
@@ -535,7 +797,7 @@ with tab_fix:
                 render.fixture_card(
                     when=fmt_when(ev.get("commence_time")), league=ev.get("_league"),
                     sport=group, home=ev.get("home_team"), away=ev.get("away_team"),
-                    h2h=h2h, total_pick=total,
+                    h2h=h2h, total_pick=total, is_live=ev.get("id") in in_play_ids,
                 ),
                 unsafe_allow_html=True,
             )
@@ -551,8 +813,11 @@ with tab_fix:
                     )
                 if h2h:
                     st.dataframe(pd.DataFrame(h2h["outcomes"]).T, width="stretch")
-                own = picks.scan_event(ev, min_ev=min_ev, devig_method=devig_method,
-                                       kelly_multiplier=kelly_mult, shrink_k=shrink_k)
+                own = [] if ev.get("id") in in_play_ids else picks.best_per_selection(
+                    picks.scan_event(ev, min_ev=min_ev, devig_method=devig_method,
+                                     kelly_multiplier=kelly_mult, shrink_k=shrink_k,
+                                     books=my_books)
+                )
                 if own:
                     st.markdown("**+EV selections on this match:**")
                     st.dataframe(pd.DataFrame([o.as_row() for o in own]),
@@ -567,7 +832,7 @@ with tab_arb:
         "doubles as an integrity check on the odds feed."
     )
     arbs, middles = [], []
-    for ev in events:
+    for ev in upcoming:
         found = arbitrage.find_arbitrage(ev, "h2h")
         if found:
             found.update({"match": f"{ev.get('home_team')} vs {ev.get('away_team')}",
@@ -608,7 +873,7 @@ with tab_model:
     )
     from src.datafeeds.football_data import DIVISIONS
 
-    col_a, col_b, col_c = st.columns(3)
+    col_a, col_b, col_c, col_d = st.columns(4)
     with col_a:
         division = st.selectbox("League", list(DIVISIONS), format_func=lambda d: DIVISIONS[d])
     with col_b:
@@ -618,14 +883,25 @@ with tab_model:
             "Time decay ξ", options=[0.0, 0.0005, 0.001, 0.0019, 0.003, 0.005], value=0.0019,
             help="Per-day exponential decay. ξ=0.0019 is roughly a one-year half-life.",
         )
+    with col_d:
+        shot_w = st.select_slider(
+            "Shots-on-target weight", options=[0.0, 0.25, 0.5, 0.75, 1.0], value=0.5,
+            help="Fraction of team strength taken from the shots-on-target fit rather "
+                 "than the goals fit. 0.5 is the walk-forward optimum: shots are a "
+                 "better-sampled measure of control (~9/match vs 2.7), goals carry "
+                 "finishing. Set 0 for the classic goals-only Dixon-Coles.",
+        )
     years = tuple(range(2026 - n_seasons, 2026))
 
     if st.button("Fit model"):
-        st.session_state["fit_request"] = (division, years, xi)
+        st.session_state["fit_request"] = (division, years, xi, shot_w)
 
     if st.session_state.get("fit_request"):
-        div_sel, yrs, xi_sel = st.session_state["fit_request"]
-        model, rows = cached_model(div_sel, yrs, xi_sel)
+        request = st.session_state["fit_request"]
+        # A session opened before the shots control existed holds a 3-tuple.
+        div_sel, yrs, xi_sel = request[:3]
+        shot_sel = request[3] if len(request) > 3 else 0.5
+        model, rows = cached_model(div_sel, yrs, xi_sel, shot_sel)
         if model is None:
             st.error(f"Not enough history for {DIVISIONS[div_sel]} in those seasons.")
         else:
@@ -635,6 +911,7 @@ with tab_model:
                 ("Teams", len(model.teams)),
                 ("Home advantage", f"{model.home_advantage:+.3f} log-goals"),
                 ("Low-score ρ", f"{model.rho:+.3f}"),
+                ("Shots weight", f"{shot_sel:.0%}"),
                 ("Decay half-life", f"{half_life:.0f}d" if half_life else "none"),
             ]), unsafe_allow_html=True)
             st.caption(
@@ -697,7 +974,7 @@ with tab_model:
 
                 with st.spinner("Walking forward..."):
                     res = walk_forward(rows, min_train=380, step=10, xi=xi_sel,
-                                       devig_method=devig_method)
+                                       devig_method=devig_method, shot_weight=shot_sel)
                 if not res.get("n"):
                     st.error(res.get("error", "no evaluable matches"))
                 else:
@@ -812,6 +1089,80 @@ with tab_ledger:
 # ============================================================== METHODOLOGY ===
 with tab_docs:
     st.markdown(render.METHODOLOGY_MD)
+
+    st.markdown("---")
+    st.markdown("### How accurate are these probabilities?")
+    st.markdown(
+        "Measured, not asserted. Every number below comes from **66,272 matches** across "
+        "18 European leagues (2015/16–2024/25), taking Pinnacle's *closing* 1X2 prices, "
+        "de-vigging each one, and comparing the result to what actually happened. "
+        "The calibration is refit with `python -m scripts.fit_calibration`."
+    )
+    st.markdown(render.stat_tiles([
+        ("Matches scored", "66,272"),
+        ("Leagues fitted", len(calibration.LEAGUE_EXPONENTS)),
+        ("Mean |bias| p≥0.6, before", "2.55pp"),
+        ("Mean |bias| p≥0.6, after", "1.65pp"),
+    ]), unsafe_allow_html=True)
+    st.markdown(
+        "**What was wrong.** The de-vigged sharp close is excellent in the middle of the "
+        "probability scale and systematically *too low* at the top of it — the "
+        "favourite–longshot bias. Across every selection priced at 60% or better, the "
+        "market said 70.6% and reality delivered 72.2%. That gap is about four standard "
+        "errors, it shows up in Pinnacle, Bet365 and the cross-book average alike, and it "
+        "sits exactly in the band this card selects from."
+    )
+    st.markdown(
+        "**What was done.** One parameter per league: the fair-probability vector is raised "
+        "to a power and renormalised. The all-league fit is "
+        f"**{calibration.SOCCER_EXPONENT:.4f}**, and fitting Over/Under 2.5 separately gives "
+        "1.0409 — two different markets with different numbers of outcomes, agreeing to four "
+        "decimal places, which is the main reason to believe the parameter rather than the story."
+    )
+    st.markdown(
+        "**One exponent was the wrong shape.** A single global constant helps 10 of 18 leagues "
+        "and *hurts* the other 8 — the Bundesliga close slightly **over**states favourites, so "
+        "sharpening it further made it worse. Fitting each league separately overfits at "
+        "2,000–5,500 matches apiece. So each league's exponent is shrunk halfway toward the "
+        f"global one (K={calibration.SHRINKAGE_K}, itself chosen out-of-sample). That cuts mean "
+        "absolute bias across leagues from 2.55pp to 1.65pp, where the global constant only "
+        "reached 2.09pp. Soccer only; other sports pass through untouched, and an unfitted "
+        "soccer league falls back to the global number."
+    )
+    from src.datafeeds.football_data import DIVISIONS as DIVISION_NAMES
+
+    exps = sorted(calibration.LEAGUE_EXPONENTS.items(), key=lambda kv: kv[1])
+    st.dataframe(
+        pd.DataFrame(
+            [{"League": DIVISION_NAMES.get(code, code), "Exponent": round(val, 4),
+              "Direction": "sharpen toward favourites" if val > 1 else "flatten toward longshots"}
+             for code, val in exps]
+        ),
+        width="stretch", hide_index=True, height=360,
+        column_config={
+            "League": st.column_config.TextColumn(width="medium"),
+            "Exponent": st.column_config.NumberColumn(format="%.4f", width="small"),
+            "Direction": st.column_config.TextColumn(width="medium"),
+        },
+    )
+    st.caption(
+        "Sorted by exponent. Below 1.0 means that league's closing line already "
+        "overstates favourites, so the correction runs the other way."
+    )
+    st.warning(
+        "**What this is not.** As a forecast of the average match it is worth almost nothing "
+        "— 0.00011 nats of log loss, better in 7 of 9 seasons. It does not make the model "
+        "smarter than the market and it is not an edge. It makes the number printed next to "
+        "a favourite honest, which matters because that is the number you size a bet from.",
+        icon="⚠️",
+    )
+    st.markdown(
+        "**The model, separately.** Mixing shots on target into the Dixon-Coles fit at a "
+        "50/50 weight is a genuinely better model — 1X2 log loss 1.0035 → 0.9993, "
+        "Over/Under 0.6876 → 0.6814. It still loses to the market on both, and the "
+        "honestly-fitted blend weight is zero on 1X2 and negative on totals. Better "
+        "ratings and scoreline distributions; no betting edge. The Model Lab uses it."
+    )
 
 if quota_left is not None:
     st.caption(f"Odds API quota remaining this month: {quota_left}")

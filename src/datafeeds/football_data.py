@@ -10,10 +10,15 @@ Column conventions used below (the file has many more):
 ==========  =================================================================
 Date        dd/mm/yy or dd/mm/yyyy
 FTHG, FTAG  full-time goals, home and away
+HS, AS      shots, home and away
+HST, AST    shots on target, home and away
 PSCH/D/A    Pinnacle *closing* 1X2 prices -- the sharpest public number
 B365C*      Bet365 closing
 AvgC*       average closing across books
 MaxC*       best closing price available anywhere (the price a line-shopper got)
+PC>2.5      Pinnacle *closing* Over 2.5. Note the naming break: the 1X2 closing
+            columns are PSCH/PSCD/PSCA but the totals ones are PC>2.5/PC<2.5,
+            and "P>2.5" without the C is the OPENING price.
 ==========  =================================================================
 
 Backtests use the closing price deliberately. Testing against opening prices
@@ -105,6 +110,16 @@ def _f(row: dict, key: str):
     return out if out > 1 else None
 
 
+def _i(row: dict, key: str):
+    """Integer count column (shots, cards). Unlike :func:`_f` these are counts,
+    so 0 and 1 are perfectly valid values and must not be filtered out."""
+    val = (row.get(key) or "").strip()
+    try:
+        return int(float(val))
+    except ValueError:
+        return None
+
+
 def fetch_season(division: str, start_year: int, timeout: int = 25) -> list:
     """One season of one division as a list of row dicts.
 
@@ -146,11 +161,23 @@ def fetch_season(division: str, start_year: int, timeout: int = 25) -> list:
                 # Market average and best-available closing.
                 "avgc": [_f(row, "AvgCH"), _f(row, "AvgCD"), _f(row, "AvgCA")],
                 "maxc": [_f(row, "MaxCH"), _f(row, "MaxCD"), _f(row, "MaxCA")],
-                # Closing over/under 2.5 (Pinnacle, then market average).
-                "ou25_psc": [_f(row, "PSCO>2.5"), _f(row, "PSCO<2.5")]
-                if _f(row, "PSCO>2.5")
-                else [_f(row, "P>2.5"), _f(row, "P<2.5")],
+                # Shots and shots on target. Cheap to carry and a materially
+                # better strength signal than goals alone -- see
+                # src/models/dixon_coles.py on the goals/shots mix.
+                "home_shots": _i(row, "HS"),
+                "away_shots": _i(row, "AS"),
+                "home_sot": _i(row, "HST"),
+                "away_sot": _i(row, "AST"),
+                # Closing over/under 2.5. The Pinnacle *closing* columns are
+                # "PC>2.5"/"PC<2.5"; "P>2.5" is the OPENING price. An earlier
+                # version looked for a "PSCO>2.5" column that does not exist in
+                # these files and silently fell through to the opening price,
+                # which quietly turned the totals backtest into a test of how
+                # fast the model is rather than how right it is.
+                "ou25_psc": [_f(row, "PC>2.5"), _f(row, "PC<2.5")],
+                "ou25_pso": [_f(row, "P>2.5"), _f(row, "P<2.5")],
                 "ou25_avg": [_f(row, "AvgC>2.5"), _f(row, "AvgC<2.5")],
+                "ou25_max": [_f(row, "MaxC>2.5"), _f(row, "MaxC<2.5")],
             }
         )
     return rows
@@ -168,17 +195,49 @@ def fetch_seasons(division: str, start_years: list) -> list:
     return out
 
 
-def to_matches(rows: list):
-    """Rows -> :class:`src.models.dixon_coles.Match` objects."""
+def to_matches(rows: list, count: str = "goals"):
+    """Rows -> :class:`src.models.dixon_coles.Match` objects.
+
+    ``count="sot"`` substitutes shots on target for goals, so the same
+    Dixon-Coles machinery can be fitted to the shot process. Rows missing shot
+    data are dropped rather than zero-filled: a zero-filled row is a claim that
+    a team had no shots, which would drag its attack rating down for a reason
+    that is purely an artefact of the file.
+    """
     from src.models.dixon_coles import Match
 
-    return [
-        Match(
-            date=r["date"],
-            home_team=r["home_team"],
-            away_team=r["away_team"],
-            home_score=r["home_score"],
-            away_score=r["away_score"],
+    if count not in ("goals", "sot"):
+        raise ValueError(f"count must be 'goals' or 'sot', got {count!r}")
+
+    home_key, away_key = ("home_score", "away_score") if count == "goals" else ("home_sot", "away_sot")
+    out = []
+    for r in rows:
+        home, away = r.get(home_key), r.get(away_key)
+        if home is None or away is None:
+            continue
+        out.append(
+            Match(
+                date=r["date"],
+                home_team=r["home_team"],
+                away_team=r["away_team"],
+                home_score=home,
+                away_score=away,
+            )
         )
-        for r in rows
-    ]
+    return out
+
+
+def shot_conversion(rows: list, default: float = 0.30) -> float:
+    """League goals per shot on target over ``rows``.
+
+    Converts a shots-on-target rate into a goal rate. Computed on the training
+    window rather than hard-coded, because it varies by league and drifts over
+    time (it is about 0.32 in the Eredivisie and 0.28 in Serie B).
+    """
+    goals = shots = 0
+    for r in rows:
+        if r.get("home_sot") is None or r.get("away_sot") is None:
+            continue
+        goals += r["home_score"] + r["away_score"]
+        shots += r["home_sot"] + r["away_sot"]
+    return goals / shots if shots else default

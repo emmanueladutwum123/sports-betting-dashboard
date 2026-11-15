@@ -35,7 +35,10 @@ from __future__ import annotations
 
 import math
 import statistics
+from datetime import datetime
 
+from src.calibration import apply as apply_calibration
+from src.calibration import calibration_for
 from src.devig import DEFAULT_METHOD, devig
 
 # Relative estimator weights. Grounded in margin size, limit size, and whether
@@ -99,6 +102,23 @@ SHARP_BOOKS = ("pinnacle", "circasports", "betfair_ex_uk", "betfair_ex_eu", "bet
 MAX_PLAUSIBLE_MARGIN = 0.25
 MIN_PLAUSIBLE_MARGIN = -0.05
 
+# Commission an exchange takes out of net winnings. The feed reports the raw
+# back price, but that is not what a winning bet pays: 7.60 on Betfair at 5%
+# returns 7.27. Ranking the raw number makes the exchange look like the best
+# price on the board when a bookmaker quoting 7.50 actually pays more.
+#
+# These are each exchange's standard published rate. Raw prices are still what
+# gets de-vigged -- commission is a cost of *taking* the price, not part of the
+# market's opinion about the probability.
+EXCHANGE_COMMISSION = {
+    "betfair_ex_uk": 0.05,
+    "betfair_ex_eu": 0.05,
+    "betfair_ex_au": 0.05,
+    "betfair": 0.05,
+    "smarkets": 0.02,
+    "matchbook": 0.02,
+}
+
 _EPS = 1e-9
 
 
@@ -108,6 +128,18 @@ def book_weight(book_key: str) -> float:
 
 def is_sharp(book_key: str) -> bool:
     return (book_key or "").lower() in SHARP_BOOKS
+
+
+def commission(book_key: str) -> float:
+    return EXCHANGE_COMMISSION.get((book_key or "").lower(), 0.0)
+
+
+def net_odds(book_key: str, decimal_odds: float) -> float:
+    """What a winning bet actually returns per unit, after exchange commission."""
+    rate = commission(book_key)
+    if not rate or not decimal_odds or decimal_odds <= 1:
+        return decimal_odds
+    return round(1.0 + (decimal_odds - 1.0) * (1.0 - rate), 4)
 
 
 def _logit(p: float) -> float:
@@ -126,12 +158,20 @@ def _expit(x: float) -> float:
 class BookQuote:
     """One book's complete price vector for one market on one event."""
 
-    __slots__ = ("key", "title", "prices", "fair", "margin", "weight")
+    __slots__ = ("key", "title", "prices", "fair", "margin", "weight", "last_update")
 
-    def __init__(self, key: str, title: str, prices: dict, method: str = DEFAULT_METHOD):
+    def __init__(
+        self,
+        key: str,
+        title: str,
+        prices: dict,
+        method: str = DEFAULT_METHOD,
+        last_update: str | None = None,
+    ):
         self.key = key
         self.title = title
-        self.prices = prices  # {outcome_label: decimal_odds}
+        self.prices = prices  # {outcome_label: decimal_odds}, as quoted
+        self.last_update = last_update  # ISO timestamp from the feed, if any
         names = list(prices.keys())
         fair_list = devig([prices[n] for n in names], method=method)
         self.fair = {n: f for n, f in zip(names, fair_list, strict=True) if f is not None}
@@ -148,6 +188,11 @@ class BookQuote:
         so any weight above zero only adds bias.
         """
         return MIN_PLAUSIBLE_MARGIN <= self.margin <= MAX_PLAUSIBLE_MARGIN
+
+    def net_price(self, outcome: str) -> float | None:
+        """The price a winning bet pays after this book's commission, if any."""
+        price = self.prices.get(outcome)
+        return net_odds(self.key, price) if price else None
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<BookQuote {self.key} margin={self.margin:.3%} {self.prices}>"
@@ -175,7 +220,8 @@ def collect_quotes(event: dict, market_key: str, point=None, method: str = DEFAU
             if len(prices) < 2:
                 continue
             quote = BookQuote(
-                bm.get("key", "?"), bm.get("title", bm.get("key", "?")), prices, method
+                bm.get("key", "?"), bm.get("title", bm.get("key", "?")), prices, method,
+                last_update=market.get("last_update") or bm.get("last_update"),
             )
             # Drop suspended / unmatched / mis-parsed vectors before they can
             # reach the anchor. See MAX_PLAUSIBLE_MARGIN for the live case that
@@ -240,11 +286,48 @@ def dispersion(quotes: list, outcome: str) -> float:
     return statistics.stdev(vals)
 
 
+# A quote this many minutes behind the rest of its market is treated as stale.
+# Measured on a live 42-book EPL board: the median quote was 7 minutes old, the
+# 99th percentile under 10, and the only outliers sat at 20+. Half an hour
+# behind the pack is not a slow refresh, it is a book that has stopped updating
+# -- and a price that has stopped updating is the usual way a number ends up
+# looking like the best on the board.
+STALE_AFTER_MINUTES = 30.0
+
+
+def _parse_ts(ts):
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def staleness(quotes: list) -> dict:
+    """{book_key: minutes its quote lags the market's median update time}.
+
+    Relative, not absolute, on purpose. The feed is itself cached, so every
+    quote ages together while the page sits open; what identifies a dead price
+    is that it stopped moving while the others kept going.
+    """
+    stamped = [(q.key, _parse_ts(q.last_update)) for q in quotes]
+    times = sorted(t.timestamp() for _, t in stamped if t is not None)
+    if len(times) < 3:
+        return {}
+    median = statistics.median(times)
+    return {
+        key: max(0.0, (median - t.timestamp()) / 60.0) for key, t in stamped if t is not None
+    }
+
+
 def best_price(quotes: list, outcome: str) -> tuple:
-    """(decimal_odds, book_key, book_title) of the best available price."""
+    """(decimal_odds, book_key, book_title) of the best available price.
+
+    Compared and returned net of exchange commission: the best price is the one
+    that pays the most, not the one with the biggest number printed on it.
+    """
     best = None
     for q in quotes:
-        price = q.prices.get(outcome)
+        price = q.net_price(outcome)
         if price and (best is None or price > best[0]):
             best = (price, q.key, q.title)
     return best or (None, None, None)
@@ -253,13 +336,27 @@ def best_price(quotes: list, outcome: str) -> tuple:
 class MarketView:
     """Everything needed to judge one market: the fair line and every price."""
 
-    def __init__(self, event: dict, market_key: str, point=None, method: str = DEFAULT_METHOD):
+    def __init__(
+        self,
+        event: dict,
+        market_key: str,
+        point=None,
+        method: str = DEFAULT_METHOD,
+        calibrate: bool = True,
+    ):
         self.market_key = market_key
         self.point = point
         self.quotes = collect_quotes(event, market_key, point, method)
         self.consensus = pool_fair_probs(self.quotes)
         self.sharp = pool_fair_probs(self.quotes, sharp_only=True)
         self.sharp_books = [q.key for q in self.quotes if is_sharp(q.key)]
+        # Residual favourite-longshot correction, applied to the anchor only.
+        # `consensus` and `sharp` stay raw so that anything comparing books to
+        # each other (dispersion, sharp-vs-soft disagreement) is unaffected --
+        # the correction is a property of the market as a forecast, not of any
+        # individual book's price.
+        sport_key = event.get("sport_key") or event.get("_sport_key")
+        self.calibration = calibration_for(sport_key, market_key) if calibrate else None
 
     @property
     def n_books(self) -> int:
@@ -277,6 +374,16 @@ class MarketView:
         anchor is Pinnacle and you are evaluating Pinnacle, there is by
         definition no edge to find, and :func:`pool_fair_probs` returns empty.
         """
+        if self.sharp:
+            sharp_ex = pool_fair_probs(self.quotes, exclude_book=exclude_book, sharp_only=True)
+            if sharp_ex:
+                return apply_calibration(sharp_ex, self.calibration)
+        return apply_calibration(
+            pool_fair_probs(self.quotes, exclude_book=exclude_book), self.calibration
+        )
+
+    def raw_anchor(self, exclude_book: str | None = None) -> dict:
+        """The anchor before calibration. Kept so the app can show both."""
         if self.sharp:
             sharp_ex = pool_fair_probs(self.quotes, exclude_book=exclude_book, sharp_only=True)
             if sharp_ex:

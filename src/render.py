@@ -251,7 +251,7 @@ METHODOLOGY_MD = """
 ## What this tool does, and what it cannot do
 
 ### The estimate
-Every fair probability here is built in four steps:
+Every fair probability here is built in five steps:
 
 1. **De-vig each book separately.** A bookmaker's prices imply probabilities
    summing to more than 1; the excess is their margin. Removing it with the
@@ -275,6 +275,12 @@ Every fair probability here is built in four steps:
    +EV, that book's own number is removed from the benchmark. Leaving it in is
    the same leakage as scoring a model on its training data, and it shrinks
    edges exactly when they are most real.
+5. **Correct the residual favourite-longshot bias.** Shin de-vigging removes
+   most of it, not all of it. Measured over 66,272 matches of closing prices,
+   the de-vigged sharp line is accurate in the middle of the probability scale
+   and about **1.5 points too low** on selections priced at 60% or better. One
+   fitted exponent corrects that, and the section at the bottom of this tab
+   shows the measurement. Soccer only.
 
 ### The stake
 Sizing uses fractional Kelly on a **shrunk** probability, where the shrinkage is
