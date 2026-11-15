@@ -123,8 +123,9 @@ st.sidebar.caption(
 )
 groups = st.sidebar.multiselect("Sports", list(odds_api.SPORT_GROUPS), default=["Soccer"])
 regions = st.sidebar.multiselect(
-    "Bookmaker regions", ["eu", "uk", "us", "au"], default=["eu", "uk"],
-    help="Sharp books (Pinnacle) live in 'eu'. Keep it selected — the fair line depends on it.",
+    "Bookmaker regions", ["eu", "uk", "us", "au"], default=["eu", "uk", "us"],
+    help="Sharp books (Pinnacle) live in 'eu'. Keep it selected — the fair line depends "
+         "on it. 'us' brings in FanDuel, DraftKings and BetMGM. Each region costs quota.",
 )
 regions_str = ",".join(regions) if regions else "eu"
 
