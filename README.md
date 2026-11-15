@@ -157,8 +157,9 @@ becomes the best one you can take. The fair line is still built from every
 book: a price you cannot bet is still evidence about what the right price is.
 
 **Books that are not in the feed.** SportyBet and bet365 are in no licensed
-feed. *Check a price from your own bookmaker* takes the odds you are being
-offered and judges them against the same fair value — verdict, the lowest
+feed. *Check and add your SportyBet prices* takes the odds you are being
+offered, judges them against the same fair value, and lets you save them so
+they compete in the Best Odds table as "SportyBet (yours)" for the session — verdict, the lowest
 price at which it becomes a bet, and the stake. A price more than 20% above
 fair gets no verdict and no stake until it has been checked, because that is
 far more often a typo or a mismatched market than a gift.
@@ -399,7 +400,7 @@ python scripts/run_backtest.py --totals SP1 2020,2021,2022,2023
 ### Tests
 
 ```bash
-python -m pytest tests/ -q      # 196 tests
+python -m pytest tests/ -q      # 204 tests
 ```
 
 ---
@@ -439,7 +440,7 @@ src/
   datafeeds/football_data.py  historical results + closing odds
 scripts/run_backtest.py     CLI backtest
 scripts/fit_calibration.py  refit the calibration exponent against closing prices
-tests/                      196 tests
+tests/                      204 tests
 ```
 
 ---

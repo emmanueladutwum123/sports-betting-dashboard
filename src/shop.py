@@ -36,6 +36,8 @@ from src.edge import (
     DEFAULT_SHRINK_K,
     MAX_PLAUSIBLE_EV,
     MIN_EV_THRESHOLD,
+    Opportunity,
+    classify,
     evaluate,
 )
 from src.market import MarketView, dispersion
@@ -152,8 +154,14 @@ def best_lines(
     shrink_k: float = DEFAULT_SHRINK_K,
     books: set | None = None,
     min_ev: float = MIN_EV_THRESHOLD,
+    extra_offers: list | None = None,
 ) -> list:
     """Best takeable price for every selection on one event.
+
+    ``extra_offers`` are prices typed in by hand from a book outside the feed
+    (see :func:`manual_offers`). They compete for "best price" like any other
+    and always count as a book you can use, but they stay out of the typical
+    price and the book count, which describe the feed's market.
 
     Every row is judged against a fair line that excludes the book offering it,
     exactly as the +EV board does, so the two views can never disagree about
@@ -176,6 +184,7 @@ def best_lines(
         typical = statistics.median(o.odds for o in offers)
 
         mine = [o for o in offers if books is None or o.book_key in books]
+        mine += [o for o in (extra_offers or []) if selection_key(o) == selection_key(offers[0])]
         live = [o for o in mine if not any(f.startswith(DROPPED_FLAGS) for f in o.flags)]
         if not live:
             continue
@@ -233,6 +242,118 @@ def markets_for(event: dict, devig_method: str = DEFAULT_METHOD) -> list:
         if view.n_books >= MIN_BOOKS_TO_SHOP and view.anchor():
             out.append((f"Total {line}", "totals", line, ["Over", "Under"]))
     return out
+
+
+MANUAL_BOOK_KEY = "manual"
+MATCH_RESULT = "Match result"
+# Side labels used when typing prices in, so one fixed list works for any match.
+SIDES = ("Home", "Draw", "Away", "Over", "Under")
+VERIFY = "⚠️ Verify first"
+
+
+def total_label(line) -> str:
+    return f"Total {line:g}"
+
+
+def market_labels(events: list) -> list:
+    """Every market label that can be typed in for these events."""
+    lines = sorted({line for event in events for line in _totals_lines(event)})
+    return [MATCH_RESULT] + [total_label(line) for line in lines]
+
+
+def _resolve(event: dict, market_label: str, side: str):
+    """(market_key, point, selection name in the feed), or an error string."""
+    if market_label == MATCH_RESULT:
+        names = {"Home": event.get("home_team"), "Away": event.get("away_team"), "Draw": "Draw"}
+        if side not in names:
+            return f"{side} is not a match-result selection — use Home, Draw or Away"
+        return "h2h", None, names[side]
+    if market_label.startswith("Total "):
+        try:
+            line = float(market_label.split(" ", 1)[1])
+        except ValueError:
+            return f"unrecognised market {market_label!r}"
+        if side not in ("Over", "Under"):
+            return f"{side} is not a totals selection — use Over or Under"
+        return "totals", line, side
+    return f"unrecognised market {market_label!r}"
+
+
+def manual_offers(
+    events_by_label: dict,
+    entries: list,
+    book_title: str = "SportyBet",
+    devig_method: str = DEFAULT_METHOD,
+    kelly_multiplier: float = DEFAULT_KELLY_FRACTION,
+    shrink_k: float = DEFAULT_SHRINK_K,
+    min_ev: float = MIN_EV_THRESHOLD,
+) -> tuple:
+    """Turn hand-typed prices from a book outside the feed into evaluated offers.
+
+    ``entries`` are ``{"match", "market", "selection", "odds"}`` rows, where
+    ``selection`` is one of :data:`SIDES`. Returns ``(offers, problems)``:
+    ``offers`` is a list of ``(Opportunity, check_price result)`` pairs and
+    ``problems`` is a list of plain-language reasons a row was skipped. A row
+    is never silently dropped and never guessed at.
+
+    Each price is judged against the full fair line, exactly as
+    :func:`check_price` does. A price more than 20% above fair is kept but
+    flagged ``implausible-EV`` and given no stake: typed by hand, that is
+    almost always a wrong digit or the wrong market.
+    """
+    offers, problems, seen = [], [], set()
+    for n, entry in enumerate(entries, start=1):
+        label, market_label = entry.get("match"), entry.get("market")
+        side, odds = entry.get("selection"), entry.get("odds")
+        if not label and not market_label and not side and not odds:
+            continue  # an untouched blank row
+        if not (label and market_label and side and odds):
+            problems.append(f"Row {n}: fill in match, market, selection and odds.")
+            continue
+        event = events_by_label.get(label)
+        if event is None:
+            problems.append(f"Row {n}: {label} is no longer on the board (started or unloaded).")
+            continue
+        resolved = _resolve(event, market_label, side)
+        if isinstance(resolved, str):
+            problems.append(f"Row {n}: {resolved}.")
+            continue
+        market_key, point, selection = resolved
+        try:
+            odds = float(odds)
+        except (TypeError, ValueError):
+            problems.append(f"Row {n}: odds must be a number.")
+            continue
+        if odds <= 1:
+            problems.append(f"Row {n}: decimal odds must be above 1.00.")
+            continue
+        res = check_price(event, market_key, point, selection, odds, devig_method,
+                          kelly_multiplier, shrink_k, min_ev)
+        if res is None:
+            problems.append(
+                f"Row {n}: too few books quote {market_label} on {label} to build a fair price."
+            )
+            continue
+        key = (event.get("id"), market_key, point, selection)
+        if key in seen:
+            problems.append(f"Row {n}: {selection} ({market_label}) on {label} is entered twice.")
+            continue
+        seen.add(key)
+
+        flags = classify(res["ev"], res["sigma"], res["n_books"], res["anchor_quality"])
+        res["verdict"] = VERIFY if res["suspicious"] else res["verdict"]
+        opp = Opportunity(
+            event_id=event.get("id"), commence_time=event.get("commence_time"),
+            league=event.get("_league"), home=event.get("home_team"),
+            away=event.get("away_team"), market=market_key, point=point,
+            selection=selection, book_key=MANUAL_BOOK_KEY, book_title=f"{book_title} (yours)",
+            odds=odds, quoted_odds=odds, lag_minutes=0.0, fair_prob=res["fair_prob"],
+            shrunk_prob=res["shrunk_prob"], sigma=res["sigma"], n_books=res["n_books"],
+            anchor_quality=res["anchor_quality"], ev=res["ev"], edge=res["edge"],
+            stake_fraction=0.0 if res["suspicious"] else res["stake_fraction"], flags=flags,
+        )
+        offers.append((opp, res))
+    return offers, problems
 
 
 def check_price(

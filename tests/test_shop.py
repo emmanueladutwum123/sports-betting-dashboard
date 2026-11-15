@@ -242,3 +242,101 @@ def test_markets_for_lists_only_markets_that_can_be_priced():
 def test_books_in_lists_every_book_once_sorted_by_title():
     books = shop.books_in([make_event(BOARD), make_event(BOARD)])
     assert list(books) == sorted(BOARD, key=lambda k: k.title().lower())
+
+
+# --------------------------------------------------- hand-typed book prices
+
+def _board_with_totals():
+    board = {k: {**v, "totals": {2.5: {"Over": 1.90, "Under": 1.90}}} for k, v in BOARD.items()}
+    event = make_event(board, home="Arsenal", away="Chelsea")
+    # Relabel the outcomes so Home/Away resolve to real team names.
+    for bm in event["bookmakers"]:
+        for market in bm["markets"]:
+            if market["key"] == "h2h":
+                for outcome in market["outcomes"]:
+                    outcome["name"] = {"A": "Arsenal", "B": "Chelsea"}[outcome["name"]]
+    return {"Arsenal vs Chelsea": event}
+
+
+def _row(selection, odds, market="Match result", match="Arsenal vs Chelsea"):
+    return {"match": match, "market": market, "selection": selection, "odds": odds}
+
+
+def test_manual_price_is_judged_like_any_other_price():
+    events = _board_with_totals()
+    offers, problems = shop.manual_offers(events, [_row("Home", 2.20)])
+    assert problems == []
+    opp, res = offers[0]
+    direct = shop.check_price(events["Arsenal vs Chelsea"], "h2h", None, "Arsenal", 2.20)
+    assert opp.selection == "Arsenal" and opp.odds == 2.20
+    assert opp.ev == pytest.approx(direct["ev"])
+    assert res["verdict"] == shop.VALUE and opp.stake_fraction > 0
+    assert opp.book_title == "SportyBet (yours)"
+
+
+def test_manual_sides_resolve_to_the_right_team_and_totals_line():
+    offers, problems = shop.manual_offers(_board_with_totals(), [
+        _row("Away", 1.80), _row("Over", 1.95, market="Total 2.5"),
+    ])
+    assert problems == []
+    assert [(o.market, o.point, o.selection) for o, _ in offers] == [
+        ("h2h", None, "Chelsea"), ("totals", 2.5, "Over"),
+    ]
+
+
+def test_manual_rows_that_cannot_be_priced_are_explained_not_dropped():
+    offers, problems = shop.manual_offers(_board_with_totals(), [
+        _row("Over", 2.0),                           # totals side on a 1X2 market
+        _row("Home", 2.0, market="Total 2.5"),       # 1X2 side on a totals market
+        _row("Over", 2.0, market="Total 4.5"),       # line nobody quotes
+        _row("Home", 2.0, match="Gone vs Missing"),  # match not on the board
+        _row("Home", 1.0),                           # not a valid price
+        _row("Home", None),                          # incomplete
+        {"match": None, "market": None, "selection": None, "odds": None},  # blank row
+    ])
+    assert offers == []
+    assert len(problems) == 6  # the blank row is ignored, the rest explained
+    assert all(p.startswith("Row ") for p in problems)
+
+
+def test_manual_duplicate_selection_is_rejected_once():
+    offers, problems = shop.manual_offers(
+        _board_with_totals(), [_row("Home", 2.10), _row("Home", 2.20)]
+    )
+    assert len(offers) == 1 and offers[0][0].odds == 2.10
+    assert len(problems) == 1 and "twice" in problems[0]
+
+
+def test_manual_typo_gets_no_stake_and_cannot_become_best_price():
+    events = _board_with_totals()
+    offers, _ = shop.manual_offers(events, [_row("Home", 21.0)])  # meant 2.10
+    opp, res = offers[0]
+    assert res["verdict"] == shop.VERIFY and opp.stake_fraction == 0
+    line = next(ln for ln in shop.best_lines(events["Arsenal vs Chelsea"], extra_offers=[opp])
+                if ln.best.selection == "Arsenal")
+    assert line.best.book_key != shop.MANUAL_BOOK_KEY
+
+
+def test_manual_price_competes_for_best_without_moving_the_market_numbers():
+    events = _board_with_totals()
+    event = events["Arsenal vs Chelsea"]
+    before = next(ln for ln in shop.best_lines(event) if ln.best.selection == "Arsenal")
+    offers, _ = shop.manual_offers(events, [_row("Home", 2.20)])
+    after = next(ln for ln in shop.best_lines(event, extra_offers=[offers[0][0]])
+                 if ln.best.selection == "Arsenal")
+    assert after.best.book_key == shop.MANUAL_BOOK_KEY and after.best.odds == 2.20
+    assert after.runner_up.odds == before.best.odds
+    assert after.typical_odds == before.typical_odds and after.n_offers == before.n_offers
+
+
+def test_only_my_manual_book_shows_only_what_i_entered():
+    events = _board_with_totals()
+    offers, _ = shop.manual_offers(events, [_row("Home", 1.85)])
+    lines = shop.best_lines(events["Arsenal vs Chelsea"], books=set(),
+                            extra_offers=[offers[0][0]])
+    assert [(ln.best.selection, ln.best.odds) for ln in lines] == [("Arsenal", 1.85)]
+
+
+def test_market_labels_cover_every_quoted_line():
+    events = list(_board_with_totals().values())
+    assert shop.market_labels(events) == ["Match result", "Total 2.5"]

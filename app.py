@@ -243,8 +243,8 @@ my_book_keys = st.sidebar.multiselect(
 )
 my_books = set(my_book_keys) or None
 st.sidebar.caption(
-    "Book not listed (SportyBet, bet365…)? Use **Check a price from your own "
-    "bookmaker** on the Best Odds tab."
+    "Book not listed (SportyBet, bet365…)? Type its prices in under **Add your "
+    "SportyBet prices** on the Best Odds tab."
 )
 
 tab_shop, tab_card, tab_ev, tab_fix, tab_arb, tab_model, tab_ledger, tab_docs = st.tabs(
@@ -268,22 +268,229 @@ with tab_shop:
     else:
         if in_play:
             st.caption(f"{len(in_play)} in-play match(es) excluded — live prices are not comparable.")
+        by_label = {
+            f"{e.get('home_team')} vs {e.get('away_team')} · {fmt_when(e.get('commence_time'))}": e
+            for e in upcoming
+        }
+
+        # ---- Prices typed in from a book outside the feed -------------------
+        entries = st.session_state.setdefault("manual_entries", [])
+        with st.expander("➕ Check and add your SportyBet prices (or any book not in the feed)",
+                         expanded=True):
+            st.caption(
+                "SportyBet and bet365 have no official data feed, so their odds are entered "
+                "by hand. Pick the match, market and selection, type the decimal odds exactly "
+                "as your book shows them, and the verdict appears straight away. **Add** keeps "
+                "the price so it competes in the table below alongside every other book. "
+                "Saved prices last for this browser session and do not update themselves — "
+                "re-check them before staking."
+            )
+            m1, m2 = st.columns([1, 2])
+            with m1:
+                manual_book = (st.text_input("Bookmaker name", "SportyBet", key="manual_book")
+                               .strip() or "SportyBet")
+            with m2:
+                st.write("")
+                only_manual = st.checkbox(
+                    f"I can only bet at {manual_book} — hide prices I cannot take",
+                    key="manual_only",
+                    help="The table below then shows only the selections you added. "
+                         "Fair value is still built from every book in the feed.",
+                )
+            p1, p2, p3, p4 = st.columns([3, 2, 2, 1])
+            with p1:
+                chosen_event = by_label[st.selectbox("Match", list(by_label), key="pc_match")]
+            check_markets = shop.markets_for(chosen_event, devig_method)
+            if not check_markets:
+                st.info("No market on this match has enough books to build a fair price.")
+            else:
+                with p2:
+                    mk_label = st.selectbox("Market", [m[0] for m in check_markets], key="pc_market")
+                _, mk_key, mk_point, mk_selections = next(m for m in check_markets if m[0] == mk_label)
+                with p3:
+                    sel_name = st.selectbox("Selection", mk_selections, key="pc_sel")
+                # Start from the typical book's price for this exact selection, and
+                # reset whenever the selection changes: a leftover number from a
+                # different bet would be judged as if it were an offer on this one.
+                typical = shop.check_price(chosen_event, mk_key, mk_point, sel_name, 2.0,
+                                           devig_method)
+                start_odds = max(1.01, round((typical or {}).get("typical_odds") or 2.0, 2))
+                with p4:
+                    offered = st.number_input(
+                        "Your odds", min_value=1.01, value=start_odds, step=0.01, format="%.2f",
+                        key=f"pc_odds_{chosen_event.get('id')}_{mk_label}_{sel_name}",
+                    )
+                res = shop.check_price(
+                    chosen_event, mk_key, mk_point, sel_name, offered, devig_method,
+                    kelly_mult, shrink_k, min_ev,
+                )
+                if res is None:
+                    st.info("No fair price available for that selection.")
+                else:
+                    # An implausible price gets no verdict and no stake until it
+                    # has been checked -- sizing a typo is how a bankroll goes.
+                    st.markdown(
+                        render.stat_tiles([
+                            ("Verdict", "⚠️ Verify first" if res["suspicious"] else res["verdict"]),
+                            ("Your odds", f"{res['offered_odds']:.2f}"),
+                            ("Fair odds", f"{res['fair_odds']:.2f}"),
+                            ("Value starts at", f"{res['min_odds_for_value']:.2f}"),
+                            ("EV", f"{res['ev'] * 100:+.2f}%"),
+                            ("Stake", "—" if res["suspicious"]
+                             else f"{bankroll * res['stake_fraction']:.2f}"),
+                        ]),
+                        unsafe_allow_html=True,
+                    )
+                    compare = (
+                        f"The best price in the feed is **{res['best_feed_odds']:.2f}** at "
+                        f"{res['best_feed_book']} (typical book: {res['typical_odds']:.2f}); yours "
+                        f"beats {res['beats_books']} of {res['n_books']} books."
+                    )
+                    basis = (
+                        f"Fair win probability **{res['fair_prob'] * 100:.1f}%** from "
+                        f"{res['n_books']} books ({res['anchor_quality']} anchor, "
+                        f"{res['sigma'] * 100:.1f}pp disagreement)."
+                    )
+                    if res["suspicious"]:
+                        st.warning(
+                            f"**{res['ev'] * 100:+.1f}% EV is too good to take at face value.** "
+                            "Check that the market matches exactly (1X2 vs draw-no-bet vs double "
+                            "chance, the same totals line, 90 minutes vs including extra time) and "
+                            f"that the odds are typed correctly. {compare}"
+                        )
+                    elif res["verdict"] == shop.VALUE:
+                        st.success(
+                            f"**Value.** {res['offered_odds']:.2f} is above the fair "
+                            f"{res['fair_odds']:.2f}. Quarter-Kelly on the conservative probability "
+                            f"sizes it at **{res['stake_fraction'] * 100:.2f}% of bankroll "
+                            f"({bankroll * res['stake_fraction']:.2f})**. {basis} {compare}"
+                        )
+                    elif res["verdict"] == shop.NOISE:
+                        st.info(
+                            f"**Positive on paper, not stakeable.** The edge "
+                            f"({res['ev'] * 100:+.2f}%) is smaller than the books' disagreement "
+                            f"about the true price, so the sized stake is zero. {basis} {compare}"
+                        )
+                    elif res["verdict"] == shop.FAIR:
+                        st.info(
+                            f"**About fair — no edge.** You would need "
+                            f"**{res['min_odds_for_value']:.2f} or better** for this to be a bet. "
+                            f"{basis} {compare}"
+                        )
+                    else:
+                        st.error(
+                            f"**Overpriced — skip, or take it elsewhere.** At "
+                            f"{res['offered_odds']:.2f} you give up {abs(res['ev']) * 100:.1f}% of "
+                            f"every stake in expectation. It becomes a bet at "
+                            f"**{res['min_odds_for_value']:.2f} or better**. {basis} {compare}"
+                        )
+
+            if check_markets and res is not None:
+                home_name, away_name = chosen_event.get("home_team"), chosen_event.get("away_team")
+                side = {home_name: "Home", away_name: "Away"}.get(sel_name, sel_name)
+                match_label = next(k for k, v in by_label.items() if v is chosen_event)
+                if st.button(f"➕ Add to my {manual_book} prices", type="primary"):
+                    # Re-entering a selection replaces its old price.
+                    entries[:] = [
+                        e for e in entries
+                        if (e["match"], e["market"], e["selection"]) != (match_label, mk_label, side)
+                    ]
+                    entries.append({"match": match_label, "market": mk_label,
+                                    "selection": side, "odds": float(offered)})
+                    st.rerun()
+
+        manual, manual_problems = shop.manual_offers(
+            by_label, entries, manual_book, devig_method, kelly_mult, shrink_k, min_ev,
+        )
+        for problem in manual_problems:
+            st.warning(problem)
+        if entries:
+            r1, r2, r3 = st.columns([4, 1, 1])
+            labels = [
+                f"{e['match'].split(' · ')[0]} — {e['selection']} ({e['market']}) @ {e['odds']:.2f}"
+                for e in entries
+            ]
+            with r1:
+                to_remove = st.multiselect(
+                    "Saved prices", range(len(entries)), format_func=lambda i: labels[i],
+                    placeholder=f"{len(entries)} saved — select any to remove",
+                    label_visibility="collapsed", key=f"manual_remove_{len(entries)}",
+                )
+            with r2:
+                if st.button("Remove selected", disabled=not to_remove, width="stretch"):
+                    entries[:] = [e for i, e in enumerate(entries) if i not in to_remove]
+                    st.rerun()
+            with r3:
+                if st.button("Clear all", width="stretch"):
+                    entries.clear()
+                    st.rerun()
+
+        shop_books = (set(my_book_keys) if only_manual and manual else my_books)
         lines = shop.shop_slate(
             upcoming, devig_method=devig_method, kelly_multiplier=kelly_mult,
-            shrink_k=shrink_k, books=my_books, min_ev=min_ev,
+            shrink_k=shrink_k, books=shop_books, min_ev=min_ev,
+            extra_offers=[o for o, _ in manual],
         )
-        value_lines = [ln for ln in lines if ln.verdict == shop.VALUE]
-        # Stakes on the value rows share one bankroll: at most one per market per
-        # match, then scaled to the exposure cap -- the same rules as the +EV board.
-        normalise_slate(
-            picks.one_stake_per_market([ln.best for ln in value_lines]), exposure_cap
-        )
+        # Every recommended stake on this tab shares one bankroll, whether the
+        # price came from the feed or was typed in: at most one per market per
+        # match, then scaled to the exposure cap -- the same rules as the +EV
+        # board. Sized once, together, so the two tables cannot add up to more
+        # than the cap between them.
+        staked = {id(ln.best): ln.best for ln in lines if ln.verdict == shop.VALUE}
+        staked.update({id(o): o for o, r in manual if r["verdict"] == shop.VALUE})
+        normalise_slate(picks.one_stake_per_market(list(staked.values())), exposure_cap)
+
+        if manual:
+            st.markdown(f"#### Your {manual_book} prices")
+            manual_rows = []
+            for opp, res in manual:
+                gap = res["best_feed_odds"] - opp.odds if res["best_feed_odds"] else 0.0
+                manual_rows.append({
+                    "Verdict": res["verdict"],
+                    "Match": f"{opp.home} vs {opp.away}",
+                    "Market": shop.MATCH_RESULT if opp.market == "h2h"
+                    else shop.total_label(opp.point),
+                    "Selection": opp.selection,
+                    f"{manual_book} odds": opp.odds,
+                    "Fair odds": round(res["fair_odds"], 2),
+                    "Value starts at": round(res["min_odds_for_value"], 2),
+                    "EV %": round(opp.ev * 100, 2),
+                    "Stake": round(bankroll * (opp.stake_fraction or 0), 2),
+                    "Stake %": round((opp.stake_fraction or 0) * 100, 2),
+                    "Best in feed": f"{res['best_feed_odds']:.2f} @ {res['best_feed_book']}",
+                    "Vs best": "better here" if gap < 0 else "same" if gap == 0
+                    else f"{gap:.2f} better elsewhere",
+                    "Win %": round(res["fair_prob"] * 100, 1),
+                    "Notes": "; ".join(opp.flags),
+                })
+            st.dataframe(
+                pd.DataFrame(manual_rows), width="stretch", hide_index=True,
+                column_config={
+                    f"{manual_book} odds": st.column_config.NumberColumn(format="%.2f"),
+                    "EV %": st.column_config.NumberColumn(format="%+.2f%%"),
+                    "Stake": st.column_config.NumberColumn(format="%.2f"),
+                    "Stake %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Win %": st.column_config.NumberColumn(format="%.1f%%"),
+                },
+            )
+            n_value = sum(1 for o, r in manual if r["verdict"] == shop.VALUE)
+            n_verify = sum(1 for o, r in manual if r["verdict"] == shop.VERIFY)
+            st.caption(
+                f"**{n_value} of {len(manual)}** {manual_book} prices are value. "
+                "**Value starts at** is the lowest odds at which the selection becomes a bet. "
+                + (f"**{n_verify}** look too good to be true and get no stake until you have "
+                   "re-checked the odds and that the market matches exactly. " if n_verify else "")
+                + "Stakes share one bankroll: one per market per match, capped at your "
+                "slate exposure."
+            )
+            st.divider()
+
         gains = sorted(ln.shop_gain for ln in lines)
         st.markdown(
             render.stat_tiles([
                 ("Matches", len(upcoming)),
                 ("Selections priced", len(lines)),
-                ("Value at best price", len(value_lines)),
+                ("Value at best price", sum(1 for ln in lines if ln.verdict == shop.VALUE)),
                 ("Median gain from shopping",
                  f"{gains[len(gains) // 2] * 100:+.1f}%" if gains else "—"),
                 ("Books compared", len(feed_books) if my_books is None else len(my_books)),
@@ -356,104 +563,6 @@ with tab_shop:
                 "price. Odds move — confirm the price on the book before staking."
             )
 
-        st.divider()
-        st.markdown("#### Check a price from your own bookmaker")
-        st.caption(
-            "SportyBet, bet365 and some regional books are not in any licensed feed. Their "
-            "prices can still be judged: type in what you are being offered and it is "
-            "measured against the same fair value as everything above."
-        )
-        by_label = {
-            f"{e.get('home_team')} vs {e.get('away_team')} · {fmt_when(e.get('commence_time'))}": e
-            for e in upcoming
-        }
-        p1, p2, p3, p4 = st.columns([3, 2, 2, 1])
-        with p1:
-            chosen_event = by_label[st.selectbox("Match", list(by_label), key="pc_match")]
-        check_markets = shop.markets_for(chosen_event, devig_method)
-        if not check_markets:
-            st.info("No market on this match has enough books to build a fair price.")
-        else:
-            with p2:
-                mk_label = st.selectbox("Market", [m[0] for m in check_markets], key="pc_market")
-            _, mk_key, mk_point, mk_selections = next(m for m in check_markets if m[0] == mk_label)
-            with p3:
-                sel_name = st.selectbox("Selection", mk_selections, key="pc_sel")
-            # Start from the typical book's price for this exact selection, and
-            # reset whenever the selection changes: a leftover number from a
-            # different bet would be judged as if it were an offer on this one.
-            typical = shop.check_price(chosen_event, mk_key, mk_point, sel_name, 2.0,
-                                       devig_method)
-            start_odds = max(1.01, round((typical or {}).get("typical_odds") or 2.0, 2))
-            with p4:
-                offered = st.number_input(
-                    "Your odds", min_value=1.01, value=start_odds, step=0.01, format="%.2f",
-                    key=f"pc_odds_{chosen_event.get('id')}_{mk_label}_{sel_name}",
-                )
-            res = shop.check_price(
-                chosen_event, mk_key, mk_point, sel_name, offered, devig_method,
-                kelly_mult, shrink_k, min_ev,
-            )
-            if res is None:
-                st.info("No fair price available for that selection.")
-            else:
-                # An implausible price gets no verdict and no stake until it
-                # has been checked -- sizing a typo is how a bankroll goes.
-                st.markdown(
-                    render.stat_tiles([
-                        ("Verdict", "⚠️ Verify first" if res["suspicious"] else res["verdict"]),
-                        ("Your odds", f"{res['offered_odds']:.2f}"),
-                        ("Fair odds", f"{res['fair_odds']:.2f}"),
-                        ("Value starts at", f"{res['min_odds_for_value']:.2f}"),
-                        ("EV", f"{res['ev'] * 100:+.2f}%"),
-                        ("Stake", "—" if res["suspicious"]
-                         else f"{bankroll * res['stake_fraction']:.2f}"),
-                    ]),
-                    unsafe_allow_html=True,
-                )
-                compare = (
-                    f"The best price in the feed is **{res['best_feed_odds']:.2f}** at "
-                    f"{res['best_feed_book']} (typical book: {res['typical_odds']:.2f}); yours "
-                    f"beats {res['beats_books']} of {res['n_books']} books."
-                )
-                basis = (
-                    f"Fair win probability **{res['fair_prob'] * 100:.1f}%** from "
-                    f"{res['n_books']} books ({res['anchor_quality']} anchor, "
-                    f"{res['sigma'] * 100:.1f}pp disagreement)."
-                )
-                if res["suspicious"]:
-                    st.warning(
-                        f"**{res['ev'] * 100:+.1f}% EV is too good to take at face value.** "
-                        "Check that the market matches exactly (1X2 vs draw-no-bet vs double "
-                        "chance, the same totals line, 90 minutes vs including extra time) and "
-                        f"that the odds are typed correctly. {compare}"
-                    )
-                elif res["verdict"] == shop.VALUE:
-                    st.success(
-                        f"**Value.** {res['offered_odds']:.2f} is above the fair "
-                        f"{res['fair_odds']:.2f}. Quarter-Kelly on the conservative probability "
-                        f"sizes it at **{res['stake_fraction'] * 100:.2f}% of bankroll "
-                        f"({bankroll * res['stake_fraction']:.2f})**. {basis} {compare}"
-                    )
-                elif res["verdict"] == shop.NOISE:
-                    st.info(
-                        f"**Positive on paper, not stakeable.** The edge "
-                        f"({res['ev'] * 100:+.2f}%) is smaller than the books' disagreement "
-                        f"about the true price, so the sized stake is zero. {basis} {compare}"
-                    )
-                elif res["verdict"] == shop.FAIR:
-                    st.info(
-                        f"**About fair — no edge.** You would need "
-                        f"**{res['min_odds_for_value']:.2f} or better** for this to be a bet. "
-                        f"{basis} {compare}"
-                    )
-                else:
-                    st.error(
-                        f"**Overpriced — skip, or take it elsewhere.** At "
-                        f"{res['offered_odds']:.2f} you give up {abs(res['ev']) * 100:.1f}% of "
-                        f"every stake in expectation. It becomes a bet at "
-                        f"**{res['min_odds_for_value']:.2f} or better**. {basis} {compare}"
-                    )
 
 # ============================================================== DAILY CARD ===
 with tab_card:
