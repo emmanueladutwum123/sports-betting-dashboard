@@ -5,3 +5,9 @@ __pycache__/
 .streamlit/secrets.toml
 .DS_Store
 bets.db
+
+research.db
+research.db-*
+.dashboard-password
+.pytest_cache/
+.ruff_cache/

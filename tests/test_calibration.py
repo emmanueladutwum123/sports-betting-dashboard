@@ -116,9 +116,10 @@ def test_soccer_h2h_uses_its_own_league_exponent():
     assert cal.exponent == pytest.approx(LEAGUE_EXPONENTS["E0"])
 
 
-def test_an_unfitted_soccer_league_falls_back_to_the_global_exponent():
+def test_an_unfitted_soccer_league_is_not_calibrated():
     """MLS and Brazil have no closing-price history in the free feed."""
-    assert calibration_for("soccer_usa_mls", "h2h") is SOCCER_H2H
+    assert calibration_for("soccer_usa_mls", "h2h") is IDENTITY
+    assert calibration_for("soccer_uefa_nations_league", "totals") is IDENTITY
 
 
 def test_a_league_measured_as_unbiased_is_not_sharpened():
@@ -204,7 +205,7 @@ def _three_way(home_price, draw_price, away_price, sport_key):
 
 
 def test_anchor_is_calibrated_for_soccer_and_raw_is_still_available():
-    view = MarketView(_three_way(1.35, 5.0, 9.0, "soccer_epl"), "h2h")
+    view = MarketView(_three_way(1.35, 5.0, 9.0, "soccer_epl"), "h2h", calibrate=True)
     raw, calibrated = view.raw_anchor(), view.anchor()
     assert calibrated["Arsenal"] > raw["Arsenal"]
     assert sum(calibrated.values()) == pytest.approx(1.0)
@@ -226,7 +227,7 @@ def test_consensus_and_sharp_pools_stay_raw():
     """Dispersion and sharp-vs-soft disagreement compare books to each other.
     The correction is a property of the market as a forecast, not of any one
     book's price, so it must not leak into those comparisons."""
-    view = MarketView(_three_way(1.35, 5.0, 9.0, "soccer_epl"), "h2h")
+    view = MarketView(_three_way(1.35, 5.0, 9.0, "soccer_epl"), "h2h", calibrate=True)
     assert view.sharp["Arsenal"] == pytest.approx(view.raw_anchor()["Arsenal"])
 
 
@@ -234,7 +235,7 @@ def test_calibration_raises_ev_on_favourites():
     """The practical consequence, stated as a test: a favourite priced at the
     de-vigged fair line looks break-even before the correction and slightly
     +EV after it. If this ever flips, the sign of the correction is wrong."""
-    view = MarketView(_three_way(1.35, 5.0, 9.0, "soccer_epl"), "h2h")
+    view = MarketView(_three_way(1.35, 5.0, 9.0, "soccer_epl"), "h2h", calibrate=True)
     fair_price = 1.0 / view.raw_anchor()["Arsenal"]
     assert view.anchor()["Arsenal"] * fair_price > 1.0
 
@@ -334,3 +335,8 @@ def test_log_loss_does_not_get_worse_on_distorted_markets():
         return -sum(math.log(max(v[y], 1e-12)) for v, y in zip(vs, outcomes, strict=True)) / len(vs)
 
     assert loss([sharpen(v, SOCCER_EXPONENT) for v in vectors]) < loss(vectors)
+
+
+def test_live_market_calibration_is_disabled_by_default():
+    view = MarketView(_three_way(1.35, 5.0, 9.0, "soccer_epl"), "h2h")
+    assert view.anchor() == view.raw_anchor()
