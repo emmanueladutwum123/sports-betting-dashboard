@@ -342,7 +342,7 @@ class MarketView:
         market_key: str,
         point=None,
         method: str = DEFAULT_METHOD,
-        calibrate: bool = True,
+        calibrate: bool = False,
     ):
         self.market_key = market_key
         self.point = point
@@ -356,7 +356,8 @@ class MarketView:
         # the correction is a property of the market as a forecast, not of any
         # individual book's price.
         sport_key = event.get("sport_key") or event.get("_sport_key")
-        self.calibration = calibration_for(sport_key, market_key) if calibrate else None
+        calibration_market = f"totals_{point}" if market_key == "totals" else market_key
+        self.calibration = calibration_for(sport_key, calibration_market) if calibrate else None
 
     @property
     def n_books(self) -> int:

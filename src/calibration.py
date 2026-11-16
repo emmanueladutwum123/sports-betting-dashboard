@@ -218,32 +218,25 @@ _LEAGUE_CALIBRATIONS = {
 
 
 def calibration_for(sport_key: str | None, market_key: str = "h2h") -> Calibration:
-    """Which calibration applies to this market, if any.
+    """Research-only calibration for fitted leagues/markets.
 
-    Deliberately conservative: anything that is not recognisably soccer gets
-    :data:`IDENTITY`. A constant fitted on European league soccer has no claim
-    on an NBA moneyline, and applying it there would be exactly the kind of
-    unearned confidence this dashboard exists to avoid.
-
-    Within soccer, a league with its own fitted exponent gets it; a soccer
-    league that was never fitted (MLS, Brazil, Japan -- no closing-price
-    history in the free feed) falls back to the global number. That fallback is
-    a judgement call worth naming: it assumes an unmeasured league looks more
-    like the average measured league than like no bias at all, which is the
-    better bet but is still a bet.
+    Unfitted competitions use identity. Live MarketView defaults to no
+    calibration because closing-price fits have not been validated at entry.
     """
     key = (sport_key or "").lower()
     if not key.startswith("soccer"):
         return IDENTITY
-    if market_key and market_key.startswith("totals"):
-        return SOCCER_TOTALS
-    if market_key not in ("h2h", "h2h_lay", ""):
+    if market_key not in ("h2h", "h2h_lay", "", "totals", "totals_2.5"):
         return IDENTITY
 
     from src.datafeeds.football_data import SPORT_KEY_TO_DIVISION
 
     division = SPORT_KEY_TO_DIVISION.get(key)
-    return _LEAGUE_CALIBRATIONS.get(division, SOCCER_H2H)
+    if division not in _LEAGUE_CALIBRATIONS:
+        return IDENTITY
+    if market_key.startswith("totals"):
+        return SOCCER_TOTALS
+    return _LEAGUE_CALIBRATIONS[division]
 
 
 def sharpen(probs: dict, exponent: float) -> dict:

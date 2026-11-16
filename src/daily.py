@@ -394,16 +394,15 @@ TICKET_LEGS = 4
 # Every leg must be a clear favourite on the fair line, at a price that is not
 # stacked against the backer, and not so short that it adds risk without return.
 TICKET_MIN_PROB = 0.60
-TICKET_MIN_EV = -0.02
+TICKET_MIN_EV = 0.01
 TICKET_MIN_ODDS = 1.15
 # A four-leg accumulator loses far more often than it wins, so its stake is
 # capped well below a single's whatever Kelly says.
-TICKET_MAX_STAKE = 0.02
-# The betting day runs 08:00 UTC to 08:00 UTC so that a night of NBA games,
-# which tips off after midnight UTC, stays on the day it belongs to.
-DAY_STARTS_HOUR_UTC = 8
+TICKET_MAX_STAKE = 0.0
+# Calendar days follow UTC, which is local time in Ghana.
+DAY_STARTS_HOUR_UTC = 0
 # Stake for a ticket priced about fairly: no edge to size, so a small flat one.
-TICKET_FLAT_STAKE = 0.005
+TICKET_FLAT_STAKE = 0.0
 NOTES_PATH = Path(__file__).resolve().parents[1] / "research" / "notes.json"
 
 
@@ -440,74 +439,23 @@ def build_ticket(
     devig_method: str = DEFAULT_METHOD,
     shrink_k: float = 1.0,
 ) -> dict:
-    """The ``n`` best-evidenced favourites across soccer and basketball for one day.
+    """Retired recommendation API. No evidence-backed accumulator exists.
 
-    Legs are ranked by conservative win probability, one per match, and split
-    between the two sports as evenly as the day allows: half from each when
-    both have enough qualifying games, the shortfall made up from the other
-    when one does not. A game that has already started is never used.
-
-    Fewer than ``n`` legs is a real answer. The ticket is never padded with a
-    selection that failed the evidence bar.
+    Kept as a safe compatibility shim. Use the own-price paper protocol for
+    prospective singles; the pure parlay arithmetic remains a research tool.
     """
     now = now or datetime.now(UTC)
     if start is None or end is None:
         start, end = betting_day(now)
-    opens = max(start, now)
-
-    ranked, in_window = {}, {}
-    for sport, events in (("Soccer", soccer_events), ("Basketball", basket_events)):
-        pool, count = [], 0
-        for event in events:
-            kick = _parse_iso(event.get("commence_time"))
-            if kick is None or not (opens <= kick < end):
-                continue
-            count += 1
-            pool.extend(candidates_from_event(event, sport, devig_method, shrink_k))
-        eligible = sorted(
-            (s for s in pool
-             if passes_quality_gate(s) and s.fair_prob >= TICKET_MIN_PROB
-             and s.ev >= TICKET_MIN_EV and s.odds >= TICKET_MIN_ODDS),
-            key=lambda s: -s.shrunk_prob,
-        )
-        one_per_match, seen = [], set()
-        for sel in eligible:
-            if sel.event_id not in seen:
-                seen.add(sel.event_id)
-                one_per_match.append(sel)
-        ranked[sport], in_window[sport] = one_per_match, count
-
-    share = n // 2
-    picked = ranked["Soccer"][:share] + ranked["Basketball"][:share]
-    rest = sorted(
-        ranked["Soccer"][share:] + ranked["Basketball"][share:], key=lambda s: -s.shrunk_prob
-    )
-    picked += rest[: n - len(picked)]
-    reserves = [s for s in rest if s not in picked]
-    picked.sort(key=lambda s: str(s.commence_time))
-
-    return {
-        "requested": n,
-        "selections": picked,
-        "reserves": reserves[:n],
-        "short_by": max(0, n - len(picked)),
-        "games": in_window,
-        "qualified": {sport: len(sels) for sport, sels in ranked.items()},
-        "start": start,
-        "end": end,
-    }
+    return {"requested": n, "selections": [], "reserves": [], "short_by": n,
+            "games": {"Soccer": 0, "Basketball": 0},
+            "qualified": {"Soccer": 0, "Basketball": 0}, "start": start, "end": end,
+            "reason": "No demonstrated accumulator edge; paper singles only."}
 
 
 def ticket_stake(parlay: dict, kelly_multiplier: float = 0.25) -> float:
-    """Fraction of bankroll for the accumulator: fractional Kelly on the
-    conservative all-legs-win probability, capped at :data:`TICKET_MAX_STAKE`.
-    Zero when the combined price carries no edge."""
-    from src.edge import kelly_fraction
-
-    if not parlay.get("n"):
-        return 0.0
-    full = kelly_fraction(parlay["all_win_prob_conservative"], parlay["combined_odds"])
-    return max(0.0, min(TICKET_MAX_STAKE, full * kelly_multiplier))
+    """Cash staking is disabled, including seemingly positive model EV."""
+    return 0.0
 
 
 # ------------------------------------------------------------ over / under
@@ -543,7 +491,7 @@ def main_total(event: dict, devig_method: str = DEFAULT_METHOD, shrink_k: float 
         return None
     _, line, view, fair = best
 
-    out = {"point": line, "n_books": view.n_books}
+    out = {"point": line, "n_books": view.n_books, "cash_stake": 0.0}
     for side in ("Over", "Under"):
         prices = [(q.net_price(side), q.title) for q in view.quotes if side in q.prices]
         if not prices:
